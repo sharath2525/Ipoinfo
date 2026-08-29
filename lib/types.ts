@@ -82,7 +82,7 @@ export type GmpRow = Ipo & {
 };
 
 export type ProviderMeta = {
-  source: "multi-source" | "ipowatch" | "ipoguru" | "ipoalerts" | "mock";
+  source: "multi-source" | "ipowatch" | "ipoguru" | "ipoalerts";
   isLive: boolean;
   message: string;
   fetchedAt: string;

@@ -28,9 +28,7 @@ The app uses free public sources by default:
 - IPO360 for recent allotment release status.
 - IPO Ji as a fallback for recently listed IPOs that one source misses.
 
-The field-level priority and fallback rules are documented in [DATA_SOURCES.md](./DATA_SOURCES.md).
-
-Optional: add one server-side API key in `.env.local` if you later want an API provider:
+Optional: add a server-side API key in `.env.local` if you later want another API source merged with the public sources:
 
 ```bash
 IPOGURU_API_KEY=your_key_here
@@ -42,7 +40,7 @@ or:
 IPOALERTS_API_KEY=your_key_here
 ```
 
-Without a key, the app still uses the live public sources. Demo data is used only if live sources are disabled or unavailable.
+Without a key, the app still uses the live public sources. The app never substitutes demo IPOs when live sources fail.
 
 ## Vercel hosting
 
@@ -62,7 +60,8 @@ Public sources can change layout or temporarily block traffic. The app therefore
 
 ## Current behavior
 
-- Open and Upcoming use live merged rows. Closed history is loaded newest-first in pages so older IPOs remain available.
+- Open and Upcoming use one merged near-live feed. Closed history is loaded newest-first with 25, 50, or 100 rows per page.
+- Closed history has a real-data backup. Live closed rows are remembered automatically and used if the primary history source is unavailable.
 - Every GMP card shows Mainboard/SME, full price band, lot size, open date, close date, and listing date.
 - IPOWatch GMP is fetched from the live GMP page.
 - Previous/current/next month IPO calendars are merged in so completed IPOs are available for allotment selection.

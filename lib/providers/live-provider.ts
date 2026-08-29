@@ -163,9 +163,9 @@ async function fetchJson<T>(url: string, headers: HeadersInit) {
   }
 }
 
-async function fetchHtml(url: string) {
+async function fetchHtml(url: string, timeoutMs = 10000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {
@@ -248,14 +248,16 @@ function normalizeIpoPremium(row: IpoPremiumRow, fetchedAt: string): Ipo | null 
 export async function fetchIpoPremiumIposPage({
   status = "all",
   start = 0,
-  length = 100
+  length = 100,
+  timeoutMs = 15000
 }: {
   status?: "all" | "open" | "upcoming" | "closed";
   start?: number;
   length?: number;
+  timeoutMs?: number;
 } = {}): Promise<IpoPremiumPage> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const userAgent = "Mozilla/5.0 (compatible; IPO Fast Check/1.0; +https://ipoinfo.online)";
 
   try {
@@ -916,7 +918,7 @@ async function fetchIpoJiIpos() {
   ];
   const htmlPages = await Promise.all(
     sourcePages.map((page) =>
-      fetchHtml(page.url)
+      fetchHtml(page.url, 6000)
         .then((html) => ({ html, status: page.status }))
         .catch(() => ({ html: "", status: page.status }))
     )
@@ -941,7 +943,7 @@ async function fetchIpoJiIpos() {
   return Promise.all(
     recentRows.map(async (row) => {
       const info = row.allotmentPath
-        ? await fetchHtml(ipoJiUrl(row.allotmentPath))
+        ? await fetchHtml(ipoJiUrl(row.allotmentPath), 3500)
             .then(parseIpoJiAllotmentInfo)
             .catch(() => ({ allotmentDate: "", registrar: "" }))
         : { allotmentDate: "", registrar: "" };
@@ -984,7 +986,7 @@ function monthCalendarUrls() {
   });
 }
 
-function mergeIpos(primary: Ipo[], secondary: Ipo[]) {
+export function mergeIpos(primary: Ipo[], secondary: Ipo[]) {
   const merged = new Map<string, Ipo>();
 
   for (const ipo of secondary) {
@@ -1127,21 +1129,21 @@ export async function fetchIpoAlertsIpos(apiKey: string) {
 }
 
 export async function fetchIpoWatchIpos() {
-  const ipoPremiumPromise = fetchIpoPremiumIposPage({ length: 100 }).catch(() => ({
-    ipos: [] as Ipo[],
-    total: 0
-  }));
+  const ipoPremiumPromise = fetchIpoPremiumIposPage({
+    length: 100,
+    timeoutMs: 6000
+  }).catch(() => ({ ipos: [] as Ipo[], total: 0 }));
   const ipoJiPromise = fetchIpoJiIpos().catch(() => [] as Ipo[]);
   const [gmpHtml, allotmentHtml, ipo360Html, ...calendarResults] = await Promise.all([
-    fetchHtml("https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/").catch(
+    fetchHtml("https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/", 8000).catch(
       () => ""
     ),
-    fetchHtml("https://ipowatch.in/ipo-allotment-status-how-to-check/").catch(
+    fetchHtml("https://ipowatch.in/ipo-allotment-status-how-to-check/", 6000).catch(
       () => ""
     ),
-    fetchHtml("https://www.ipo360.in/allotment-status").catch(() => ""),
+    fetchHtml("https://www.ipo360.in/allotment-status", 6000).catch(() => ""),
     ...monthCalendarUrls().map((url) =>
-      fetchHtml(url).catch(() => "")
+      fetchHtml(url, 6000).catch(() => "")
     )
   ]);
   const gmpIpos = gmpHtml ? parseIpoWatchRows(gmpHtml).map(rowToIpo) : [];

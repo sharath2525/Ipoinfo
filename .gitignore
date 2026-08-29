@@ -5,3 +5,5 @@ dist
 .env
 .env.local
 npm-debug.log*
+*.tsbuildinfo
+IPO_DATA_RULEBOOK.local.md

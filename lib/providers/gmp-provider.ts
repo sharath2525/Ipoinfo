@@ -25,7 +25,7 @@ export function toGmpRows(ipos: Ipo[]): GmpRow[] {
     });
 }
 
-export class MockGmpProvider implements GmpProvider {
+export class LiveGmpProvider implements GmpProvider {
   getMeta() {
     return getIpoDataProvider().getMeta();
   }
@@ -37,5 +37,5 @@ export class MockGmpProvider implements GmpProvider {
 }
 
 export function getGmpProvider(): GmpProvider {
-  return new MockGmpProvider();
+  return new LiveGmpProvider();
 }

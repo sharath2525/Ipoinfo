@@ -5,6 +5,7 @@ import { isValidPan, normalizePan } from "@/lib/pan";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
 const gmpFilters = ["open", "upcoming", "closed"] as const;
+const closedPageSizes = [25, 50, 100] as const;
 
 type CaptchaState = {
   token?: string;
@@ -157,6 +158,12 @@ function recentResultsFirst(ipos: Ipo[]) {
   });
 }
 
+function paginationWindow(currentPage: number, totalPages: number) {
+  const visibleCount = Math.min(3, totalPages);
+  const start = Math.max(1, Math.min(currentPage - 1, totalPages - visibleCount + 1));
+  return Array.from({ length: visibleCount }, (_, index) => start + index);
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<"allotment" | "gmp">("allotment");
   const [ipos, setIpos] = useState<Ipo[]>([]);
@@ -173,32 +180,30 @@ export default function Home() {
   const [gmpFilter, setGmpFilter] = useState<(typeof gmpFilters)[number]>("open");
   const [closedGmpRows, setClosedGmpRows] = useState<GmpRow[]>([]);
   const [closedTotal, setClosedTotal] = useState(0);
-  const [closedNextOffset, setClosedNextOffset] = useState(0);
+  const [closedPage, setClosedPage] = useState(1);
+  const [closedPageSize, setClosedPageSize] = useState<(typeof closedPageSizes)[number]>(25);
   const [closedLoaded, setClosedLoaded] = useState(false);
   const [closedLoading, setClosedLoading] = useState(false);
   const [closedError, setClosedError] = useState("");
-  const closedRequestInFlight = useRef(false);
+  const closedRequestId = useRef(0);
+  const gmpResultsTop = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     async function loadData() {
       try {
-        const [ipoResponse, gmpResponse] = await Promise.all([
-          fetch("/api/ipos"),
-          fetch("/api/gmp")
-        ]);
-        const ipoData = (await ipoResponse.json()) as { ipos: Ipo[] };
-        const gmpData = (await gmpResponse.json()) as { gmp: GmpRow[] };
+        const response = await fetch("/api/feed");
+        const data = (await response.json()) as { ipos: Ipo[]; gmp: GmpRow[] };
 
-        if (!ipoResponse.ok || !gmpResponse.ok) {
+        if (!response.ok) {
           throw new Error("IPO data is temporarily unavailable.");
         }
 
-        setIpos(ipoData.ipos);
+        setIpos(data.ipos);
         const allotmentChoices = recentResultsFirst(
-          ipoData.ipos.filter(isLastOrThisMonthResult)
+          data.ipos.filter(isLastOrThisMonthResult)
         );
         setSelectedIpoId(allotmentChoices[0]?.id ?? "");
-        setGmpRows(gmpData.gmp);
+        setGmpRows(data.gmp);
       } catch (error) {
         setLoadError(error instanceof Error ? error.message : "Could not load IPO data.");
       }
@@ -208,13 +213,13 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === "gmp" && gmpFilter === "closed" && !closedLoaded) {
-      void loadClosedHistory(true);
+    if (activeTab === "gmp" && gmpFilter === "closed") {
+      void loadClosedHistory(closedPage, closedPageSize);
     }
-  }, [activeTab, closedLoaded, gmpFilter]);
+  }, [activeTab, closedPage, closedPageSize, gmpFilter]);
 
   const filteredGmp = useMemo(() => {
-    const sourceRows = gmpFilter === "closed" && closedLoaded ? closedGmpRows : gmpRows;
+    const sourceRows = gmpFilter === "closed" ? closedGmpRows : gmpRows;
 
     return sortGmpRows(sourceRows.filter((row) => {
       const matchesFilter = gmpGroup(row) === gmpFilter;
@@ -223,7 +228,7 @@ export default function Home() {
         .includes(gmpSearch.trim().toLowerCase());
       return matchesFilter && matchesSearch;
     }));
-  }, [closedGmpRows, closedLoaded, gmpFilter, gmpRows, gmpSearch]);
+  }, [closedGmpRows, gmpFilter, gmpRows, gmpSearch]);
 
   const selectedIpo = ipos.find((ipo) => ipo.id === selectedIpoId);
   const allotmentIpos = useMemo(
@@ -232,6 +237,10 @@ export default function Home() {
   );
   const currentResult = results?.results[0];
   const currentCaptcha = currentResult ? captchas[resultKey(currentResult)] : undefined;
+  const closedTotalPages = Math.max(1, Math.ceil(closedTotal / closedPageSize));
+  const closedPageNumbers = paginationWindow(closedPage, closedTotalPages);
+  const closedRangeStart = closedTotal ? (closedPage - 1) * closedPageSize + 1 : 0;
+  const closedRangeEnd = Math.min(closedPage * closedPageSize, closedTotal);
 
   function resultKey(result: AllotmentResult) {
     return `${result.ipoId}:${result.pan}`;
@@ -261,22 +270,19 @@ export default function Home() {
     });
   }
 
-  async function loadClosedHistory(reset = false) {
-    if (closedRequestInFlight.current) return;
-
-    closedRequestInFlight.current = true;
+  async function loadClosedHistory(page: number, pageSize: number) {
+    const requestId = ++closedRequestId.current;
     setClosedLoading(true);
+    setClosedLoaded(false);
     setClosedError("");
-    const offset = reset ? 0 : closedNextOffset;
+    setClosedGmpRows([]);
+    const offset = (page - 1) * pageSize;
 
     try {
-      const response = await fetch(`/api/gmp/history?offset=${offset}&limit=50`, {
-        cache: "no-store"
-      });
+      const response = await fetch(`/api/gmp/history?offset=${offset}&limit=${pageSize}`);
       const data = (await response.json()) as {
         gmp?: GmpRow[];
         total?: number;
-        nextOffset?: number;
         error?: string;
       };
 
@@ -284,22 +290,23 @@ export default function Home() {
         throw new Error(data.error ?? "Closed IPO history is temporarily unavailable.");
       }
 
-      setClosedGmpRows((current) => {
-        const rows = reset ? [] : current;
-        const merged = new Map(rows.map((row) => [row.id, row]));
-        for (const row of data.gmp ?? []) merged.set(row.id, row);
-        return sortGmpRows(Array.from(merged.values()));
-      });
+      if (requestId !== closedRequestId.current) return;
+
+      setClosedGmpRows(sortGmpRows(data.gmp ?? []));
       setClosedTotal(data.total ?? 0);
-      setClosedNextOffset(data.nextOffset ?? offset + (data.gmp?.length ?? 0));
       setClosedLoaded(true);
+      if (page > 1) {
+        requestAnimationFrame(() => {
+          gmpResultsTop.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
     } catch (error) {
+      if (requestId !== closedRequestId.current) return;
       setClosedError(
         error instanceof Error ? error.message : "Closed IPO history is temporarily unavailable."
       );
     } finally {
-      closedRequestInFlight.current = false;
-      setClosedLoading(false);
+      if (requestId === closedRequestId.current) setClosedLoading(false);
     }
   }
 
@@ -716,6 +723,8 @@ export default function Home() {
                 </div>
               </div>
 
+              <div className="gmp-results-anchor" ref={gmpResultsTop} />
+
               {filteredGmp.length ? (
                 <div className="gmp-list">
                   {filteredGmp.map((row) => (
@@ -772,20 +781,66 @@ export default function Home() {
                   ))}
                   {gmpFilter === "closed" && closedLoaded ? (
                     <div className="history-footer">
-                      <span>
-                        Showing {closedGmpRows.length.toLocaleString("en-IN")} of{" "}
-                        {closedTotal.toLocaleString("en-IN")}
-                      </span>
-                      {closedNextOffset < closedTotal ? (
+                      <div className="history-summary">
+                        <span>
+                          {closedRangeStart.toLocaleString("en-IN")}-
+                          {closedRangeEnd.toLocaleString("en-IN")} of{" "}
+                          {closedTotal.toLocaleString("en-IN")}
+                        </span>
+                        <label className="page-size-control">
+                          <span>Rows</span>
+                          <select
+                            aria-label="Closed IPOs per page"
+                            value={closedPageSize}
+                            onChange={(event) => {
+                              setClosedPage(1);
+                              setClosedPageSize(
+                                Number(event.target.value) as (typeof closedPageSizes)[number]
+                              );
+                            }}
+                          >
+                            {closedPageSizes.map((size) => (
+                              <option key={size} value={size}>
+                                {size}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <nav className="pagination" aria-label="Closed IPO history pages">
                         <button
-                          className="secondary compact-button"
-                          disabled={closedLoading}
-                          onClick={() => loadClosedHistory(false)}
+                          aria-label="Previous closed IPO page"
+                          className="page-button page-direction"
+                          disabled={closedLoading || closedPage === 1}
+                          onClick={() => setClosedPage((page) => Math.max(1, page - 1))}
                           type="button"
                         >
-                          {closedLoading ? "Loading..." : "Load More"}
+                          Previous
                         </button>
-                      ) : null}
+                        {closedPageNumbers.map((page) => (
+                          <button
+                            aria-current={closedPage === page ? "page" : undefined}
+                            className={`page-button ${closedPage === page ? "active" : ""}`}
+                            disabled={closedLoading}
+                            key={page}
+                            onClick={() => setClosedPage(page)}
+                            type="button"
+                          >
+                            {page}
+                          </button>
+                        ))}
+                        <button
+                          aria-label="Next closed IPO page"
+                          className="page-button page-direction"
+                          disabled={closedLoading || closedPage >= closedTotalPages}
+                          onClick={() =>
+                            setClosedPage((page) => Math.min(closedTotalPages, page + 1))
+                          }
+                          type="button"
+                        >
+                          Next
+                        </button>
+                      </nav>
                     </div>
                   ) : null}
                 </div>
