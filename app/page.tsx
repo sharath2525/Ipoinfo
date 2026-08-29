@@ -24,6 +24,19 @@ function rupee(value: number) {
 
 function timeLabel(value?: string) {
   if (!value) return "Not updated";
+
+  const dayTimeMatch = value.match(/^(\d{1,2})\s+([A-Za-z]{3,9}),?\s+(\d{1,2}):(\d{2})$/);
+  if (dayTimeMatch) {
+    const [, day, month, hour, minute] = dayTimeMatch;
+    return `${day} ${month}, ${hour}:${minute}`;
+  }
+
+  const dayMonthMatch = value.match(/^(\d{1,2})\s+([A-Za-z]{3,9})$/);
+  if (dayMonthMatch) {
+    const [, day, month] = dayMonthMatch;
+    return `${day} ${month}`;
+  }
+
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
 
@@ -76,6 +89,36 @@ function parseDate(value?: string) {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function dateTime(value?: string) {
+  return parseDate(value)?.getTime() ?? 0;
+}
+
+function sortGmpRows(rows: GmpRow[]) {
+  const statusPriority: Record<string, number> = {
+    open: 0,
+    upcoming: 1,
+    closed: 2,
+    listing_soon: 3,
+    listed: 4
+  };
+
+  return [...rows].sort((first, second) => {
+    const priority =
+      (statusPriority[first.status] ?? 5) - (statusPriority[second.status] ?? 5);
+
+    if (priority !== 0) return priority;
+
+    if (first.status === "upcoming") {
+      return dateTime(first.openDate) - dateTime(second.openDate);
+    }
+
+    return (
+      dateTime(second.closeDate) - dateTime(first.closeDate) ||
+      dateTime(second.listingDate) - dateTime(first.listingDate)
+    );
+  });
 }
 
 function isCompletedIpo(ipo: Ipo) {
@@ -158,13 +201,13 @@ export default function Home() {
   }, []);
 
   const filteredGmp = useMemo(() => {
-    return gmpRows.filter((row) => {
+    return sortGmpRows(gmpRows.filter((row) => {
       const matchesFilter = gmpFilter === "all" || row.status === gmpFilter;
       const matchesSearch = row.name
         .toLowerCase()
         .includes(gmpSearch.trim().toLowerCase());
       return matchesFilter && matchesSearch;
-    });
+    }));
   }, [gmpFilter, gmpRows, gmpSearch]);
 
   const selectedIpo = ipos.find((ipo) => ipo.id === selectedIpoId);
@@ -625,6 +668,11 @@ export default function Home() {
                         <p>
                           {statusLabel(row.status)} • Updated {timeLabel(row.gmpLastUpdated)}
                         </p>
+                        <div className="date-strip">
+                          <span>Open {dateLabel(row.openDate)}</span>
+                          <span>Close {dateLabel(row.closeDate)}</span>
+                          <span>List {dateLabel(row.listingDate)}</span>
+                        </div>
                       </div>
                       <div className="gmp-cell">
                         <span>Price</span>

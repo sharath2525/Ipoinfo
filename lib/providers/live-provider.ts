@@ -67,6 +67,7 @@ type IpoJiListedRow = {
   closeDate: string;
   priceBand: string;
   allotmentPath?: string;
+  status: IpoStatus;
 };
 
 function slugify(value: string) {
@@ -169,8 +170,7 @@ function parseListing(value: string, price: number, gmp: number) {
   };
 }
 
-function yearAwareRange(value: string) {
-  const today = new Date();
+function monthIndexFromName(value: string) {
   const monthNames = [
     "january",
     "february",
@@ -186,8 +186,46 @@ function yearAwareRange(value: string) {
     "december"
   ];
   const lower = value.toLowerCase();
-  const monthIndex = monthNames.findIndex((month) => lower.includes(month));
-  const numbers = value.match(/\d{1,2}/g)?.map(Number) ?? [];
+  return monthNames.findIndex((month) => lower.includes(month.slice(0, 3)));
+}
+
+function yearAwareRange(value: string) {
+  const today = new Date();
+  const years = value.match(/\b20\d{2}\b/g)?.map(Number) ?? [];
+  const explicitYear = years[years.length - 1] ?? today.getFullYear();
+  const datePieces = value.match(/([A-Za-z]{3,9})\s+(\d{1,2})|\b(\d{1,2})\s+([A-Za-z]{3,9})/g) ?? [];
+
+  if (datePieces.length) {
+    const parsed = datePieces
+      .map((piece) => {
+        const monthIndex = monthIndexFromName(piece);
+        const day = Number(piece.match(/\d{1,2}/)?.[0] ?? 0);
+        return monthIndex >= 0 && day
+          ? new Date(explicitYear, monthIndex, day)
+          : null;
+      })
+      .filter(Boolean) as Date[];
+
+    if (parsed.length) {
+      const open = parsed[0];
+      const close = parsed[parsed.length - 1];
+
+      if (parsed.length > 1 && close < open) {
+        open.setFullYear(open.getFullYear() - 1);
+      }
+
+      return {
+        openDate: open.toISOString().slice(0, 10),
+        closeDate: close.toISOString().slice(0, 10)
+      };
+    }
+  }
+
+  const monthIndex = monthIndexFromName(value);
+  const numbers = value
+    .replace(/\b20\d{2}\b/g, "")
+    .match(/\d{1,2}/g)
+    ?.map(Number) ?? [];
 
   if (monthIndex === -1 || !numbers.length) {
     return { openDate: "", closeDate: "" };
@@ -196,8 +234,8 @@ function yearAwareRange(value: string) {
   const startDay = numbers[0];
   const endDay = numbers[numbers.length - 1];
   const startMonth = endDay < startDay ? monthIndex - 1 : monthIndex;
-  const start = new Date(today.getFullYear(), startMonth, startDay);
-  const end = new Date(today.getFullYear(), monthIndex, endDay);
+  const start = new Date(explicitYear, startMonth, startDay);
+  const end = new Date(explicitYear, monthIndex, endDay);
 
   return {
     openDate: start.toISOString().slice(0, 10),
@@ -247,6 +285,12 @@ function normalizeKey(name: string) {
     .replace(/\bltd\b/g, "")
     .replace(/\bsme\b/g, "")
     .replace(/\bipo\b/g, "")
+    .replace(/\bindia\b/g, "")
+    .replace(/\bindian\b/g, "")
+    .replace(/\bsolution\b/g, "")
+    .replace(/\bsolutions\b/g, "")
+    .replace(/\bpvt\b/g, "")
+    .replace(/\bprivate\b/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
@@ -574,12 +618,23 @@ function parseIpo360AllotmentRows(html: string) {
   return rows;
 }
 
-function parseIpoJiListedRows(html: string) {
+function parseIpoJiListedRows(html: string, pageStatus: IpoStatus) {
   const $ = cheerio.load(html);
   const rows: IpoJiListedRow[] = [];
 
   $("article.ipo-card").each((_, card) => {
     const name = $(card).find(".ipo-card-name").first().text().replace(/\s+/g, " ").trim();
+    const sourceStatus = $(card).attr("data-ipo-status")?.toLowerCase();
+    const status: IpoStatus =
+      pageStatus === "listed"
+        ? "listed"
+        : sourceStatus === "upcoming"
+        ? "upcoming"
+        : sourceStatus === "current"
+          ? "open"
+          : sourceStatus === "listed"
+            ? "listed"
+            : pageStatus;
     const dates = $(card)
       .find(".ipo-card-date time")
       .map((__, time) => $(time).attr("datetime")?.trim() ?? "")
@@ -616,7 +671,8 @@ function parseIpoJiListedRows(html: string) {
       openDate: isoDate(dates[0]),
       closeDate: isoDate(dates[1]),
       priceBand,
-      allotmentPath
+      allotmentPath,
+      status
     });
   });
 
@@ -675,13 +731,25 @@ function parseIpoJiAllotmentInfo(html: string) {
   return { allotmentDate, registrar };
 }
 
-async function fetchIpoJiListedIpos() {
+async function fetchIpoJiIpos() {
+  const sourcePages: Array<{ url: string; status: IpoStatus }> = [
+    { url: "https://www.ipoji.com/ipo/current-ipo", status: "open" },
+    { url: "https://www.ipoji.com/sme-ipo/current-ipo", status: "open" },
+    { url: "https://www.ipoji.com/ipo/upcoming-ipo", status: "upcoming" },
+    { url: "https://www.ipoji.com/sme-ipo/upcoming-ipo", status: "upcoming" },
+    { url: "https://www.ipoji.com/ipo/listed-ipo", status: "listed" },
+    { url: "https://www.ipoji.com/sme-ipo/listed-ipo", status: "listed" }
+  ];
   const htmlPages = await Promise.all(
-    ["https://www.ipoji.com/ipo/listed-ipo", "https://www.ipoji.com/sme-ipo/listed-ipo"].map(
-      (url) => fetchHtml(url).catch(() => "")
+    sourcePages.map((page) =>
+      fetchHtml(page.url)
+        .then((html) => ({ html, status: page.status }))
+        .catch(() => ({ html: "", status: page.status }))
     )
   );
-  const rows = htmlPages.flatMap((html) => (html ? parseIpoJiListedRows(html) : []));
+  const rows = htmlPages.flatMap((page) =>
+    page.html ? parseIpoJiListedRows(page.html, page.status) : []
+  );
   const start = recentWindowStart();
   const seen = new Set<string>();
   const recentRows = rows.filter((row) => {
@@ -703,7 +771,7 @@ async function fetchIpoJiListedIpos() {
             .then(parseIpoJiAllotmentInfo)
             .catch(() => ({ allotmentDate: "", registrar: "" }))
         : { allotmentDate: "", registrar: "" };
-      const allotmentDate = info.allotmentDate || estimateAllotmentDate(row.closeDate, "listed");
+      const allotmentDate = info.allotmentDate || estimateAllotmentDate(row.closeDate, row.status);
       const registrar = info.registrar || "Registrar to confirm";
 
       return {
@@ -718,8 +786,8 @@ async function fetchIpoJiListedIpos() {
         registrar,
         allotmentUrl: registrarUrl(registrar),
         allotmentStatusText: allotmentDate ? `Out: ${shortDateText(allotmentDate)}` : "Out",
-        status: "listed" as const,
-        allotmentAvailability: "available" as const,
+        status: row.status,
+        allotmentAvailability: availabilityFrom(row.status, allotmentDate),
         gmp: 0,
         gmpLastUpdated: "",
         dataSource: "IPO Ji"
@@ -755,8 +823,8 @@ function mergeIpos(primary: Ipo[], secondary: Ipo[]) {
     merged.set(key, {
       ...(existing ?? {}),
       ...ipo,
-      openDate: ipo.openDate || existing?.openDate || "",
-      closeDate: ipo.closeDate || existing?.closeDate || "",
+      openDate: existing?.openDate || ipo.openDate || "",
+      closeDate: existing?.closeDate || ipo.closeDate || "",
       allotmentDate: existing?.allotmentDate || ipo.allotmentDate,
       listingDate: existing?.listingDate || ipo.listingDate,
       issuePriceMax: ipo.issuePriceMax || existing?.issuePriceMax || 0,
@@ -896,7 +964,7 @@ export async function fetchIpoWatchIpos() {
   const calendarIpos = calendarResults.flatMap((html) =>
     html ? parseIpoWatchCalendarRows(html) : []
   );
-  const ipoJiIpos = await fetchIpoJiListedIpos().catch(() => []);
+  const ipoJiIpos = await fetchIpoJiIpos().catch(() => []);
   const allotments = [
     ...(allotmentHtml ? parseIpoWatchAllotmentRows(allotmentHtml) : []),
     ...(ipo360Html ? parseIpo360AllotmentRows(ipo360Html) : [])
