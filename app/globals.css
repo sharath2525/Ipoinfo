@@ -249,7 +249,8 @@ h3 {
 }
 
 .secondary:hover,
-.ghost:hover {
+.ghost:hover,
+.filter:hover {
   border-color: var(--brand);
 }
 
@@ -691,45 +692,39 @@ h3 {
 
 .gmp-tools {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   margin-bottom: 14px;
 }
 
-.gmp-sections,
+.filters {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.filter {
+  min-height: 36px;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 14px;
+  background: #fff;
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.filter.active {
+  border-color: var(--brand);
+  color: #fff;
+  background: var(--brand);
+}
+
 .gmp-list {
   display: grid;
   gap: 10px;
-}
-
-.gmp-sections {
-  gap: 18px;
-}
-
-.gmp-section {
-  display: grid;
-  gap: 10px;
-}
-
-.gmp-section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.gmp-section-head span {
-  display: inline-flex;
-  min-width: 28px;
-  min-height: 26px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--brand);
-  background: var(--panel-soft);
-  font-size: 0.78rem;
-  font-weight: 850;
 }
 
 .gmp-card {

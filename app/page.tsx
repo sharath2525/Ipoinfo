@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
+const gmpFilters = ["open", "upcoming", "closed"] as const;
+
 type CaptchaState = {
   token?: string;
   image?: string;
@@ -112,12 +114,6 @@ function gmpGroup(row: GmpRow): "open" | "upcoming" | "closed" {
   return "closed";
 }
 
-function groupTitle(group: "open" | "upcoming" | "closed") {
-  if (group === "open") return "Open IPOs";
-  if (group === "upcoming") return "Upcoming IPOs";
-  return "Recently Closed IPOs";
-}
-
 function isCompletedIpo(ipo: Ipo) {
   const closeDate = parseDate(ipo.closeDate);
   return (
@@ -167,6 +163,7 @@ export default function Home() {
   const [results, setResults] = useState<BatchCheckResponse | null>(null);
   const [captchas, setCaptchas] = useState<Record<string, CaptchaState>>({});
   const [gmpSearch, setGmpSearch] = useState("");
+  const [gmpFilter, setGmpFilter] = useState<(typeof gmpFilters)[number]>("open");
 
   useEffect(() => {
     async function loadData() {
@@ -198,20 +195,13 @@ export default function Home() {
 
   const filteredGmp = useMemo(() => {
     return sortGmpRows(gmpRows.filter((row) => {
+      const matchesFilter = gmpGroup(row) === gmpFilter;
       const matchesSearch = row.name
         .toLowerCase()
         .includes(gmpSearch.trim().toLowerCase());
-      return matchesSearch;
+      return matchesFilter && matchesSearch;
     }));
-  }, [gmpRows, gmpSearch]);
-
-  const groupedGmp = useMemo(() => {
-    return {
-      open: filteredGmp.filter((row) => gmpGroup(row) === "open"),
-      upcoming: filteredGmp.filter((row) => gmpGroup(row) === "upcoming"),
-      closed: filteredGmp.filter((row) => gmpGroup(row) === "closed")
-    };
-  }, [filteredGmp]);
+  }, [gmpFilter, gmpRows, gmpSearch]);
 
   const selectedIpo = ipos.find((ipo) => ipo.id === selectedIpoId);
   const allotmentIpos = useMemo(
@@ -648,59 +638,59 @@ export default function Home() {
                   placeholder="Search IPO"
                   aria-label="Search IPO"
                 />
+                <div className="filters" aria-label="GMP filters">
+                  {gmpFilters.map((filter) => (
+                    <button
+                      className={`filter ${gmpFilter === filter ? "active" : ""}`}
+                      key={filter}
+                      onClick={() => setGmpFilter(filter)}
+                      type="button"
+                    >
+                      {statusLabel(filter)}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {filteredGmp.length ? (
-                <div className="gmp-sections">
-                  {(["open", "upcoming", "closed"] as const).map((group) =>
-                    groupedGmp[group].length ? (
-                      <section className="gmp-section" key={group}>
-                        <div className="gmp-section-head">
-                          <h3>{groupTitle(group)}</h3>
-                          <span>{groupedGmp[group].length}</span>
+                <div className="gmp-list">
+                  {filteredGmp.map((row) => (
+                    <article className="gmp-card" key={row.id}>
+                      <div className="gmp-name">
+                        <strong>{row.name}</strong>
+                        <p>
+                          {statusLabel(gmpGroup(row))} • Updated{" "}
+                          {timeLabel(row.gmpLastUpdated)}
+                        </p>
+                        <div className="date-strip">
+                          <span>Open {dateLabel(row.openDate)}</span>
+                          <span>Close {dateLabel(row.closeDate)}</span>
+                          <span>List {dateLabel(row.listingDate)}</span>
                         </div>
-                        <div className="gmp-list">
-                          {groupedGmp[group].map((row) => (
-                            <article className="gmp-card" key={row.id}>
-                              <div className="gmp-name">
-                                <strong>{row.name}</strong>
-                                <p>
-                                  {statusLabel(gmpGroup(row))} • Updated{" "}
-                                  {timeLabel(row.gmpLastUpdated)}
-                                </p>
-                                <div className="date-strip">
-                                  <span>Open {dateLabel(row.openDate)}</span>
-                                  <span>Close {dateLabel(row.closeDate)}</span>
-                                  <span>List {dateLabel(row.listingDate)}</span>
-                                </div>
-                              </div>
-                              <div className="gmp-cell">
-                                <span>Price</span>
-                                <strong>{rupee(row.issuePriceMax)}</strong>
-                              </div>
-                              <div className="gmp-cell">
-                                <span>GMP</span>
-                                <strong className={row.gmp >= 0 ? "positive" : ""}>
-                                  {rupee(row.gmp)}
-                                </strong>
-                              </div>
-                              <div className="gmp-cell">
-                                <span>GMP %</span>
-                                <strong className={row.gmpPercent >= 0 ? "positive" : ""}>
-                                  {row.gmpPercent >= 0 ? "+" : ""}
-                                  {row.gmpPercent.toFixed(1)}%
-                                </strong>
-                              </div>
-                              <div className="gmp-cell">
-                                <span>Est. Listing</span>
-                                <strong>{rupee(row.estimatedListingPrice)}</strong>
-                              </div>
-                            </article>
-                          ))}
-                        </div>
-                      </section>
-                    ) : null
-                  )}
+                      </div>
+                      <div className="gmp-cell">
+                        <span>Price</span>
+                        <strong>{rupee(row.issuePriceMax)}</strong>
+                      </div>
+                      <div className="gmp-cell">
+                        <span>GMP</span>
+                        <strong className={row.gmp >= 0 ? "positive" : ""}>
+                          {rupee(row.gmp)}
+                        </strong>
+                      </div>
+                      <div className="gmp-cell">
+                        <span>GMP %</span>
+                        <strong className={row.gmpPercent >= 0 ? "positive" : ""}>
+                          {row.gmpPercent >= 0 ? "+" : ""}
+                          {row.gmpPercent.toFixed(1)}%
+                        </strong>
+                      </div>
+                      <div className="gmp-cell">
+                        <span>Est. Listing</span>
+                        <strong>{rupee(row.estimatedListingPrice)}</strong>
+                      </div>
+                    </article>
+                  ))}
                 </div>
               ) : (
                 <div className="empty">No GMP rows match this view.</div>
