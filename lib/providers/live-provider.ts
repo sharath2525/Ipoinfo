@@ -1,4 +1,4 @@
-import type { AllotmentAvailability, Ipo, IpoStatus } from "@/lib/types";
+import type { AllotmentAvailability, Ipo, IpoMarket, IpoStatus } from "@/lib/types";
 import * as cheerio from "cheerio";
 
 type IpoGuruRow = {
@@ -68,6 +68,32 @@ type IpoJiListedRow = {
   priceBand: string;
   allotmentPath?: string;
   status: IpoStatus;
+};
+
+type IpoPremiumRow = {
+  id?: number | string;
+  name?: string;
+  script_code?: string | null;
+  min_price?: number | string | null;
+  max_price?: number | string | null;
+  lot_size?: number | string | null;
+  premium?: number | string | null;
+  open?: string | null;
+  close?: string | null;
+  allotment_date?: string | null;
+  listing_date?: string | null;
+  current_status?: string | null;
+};
+
+type IpoPremiumPayload = {
+  recordsTotal?: number;
+  recordsFiltered?: number;
+  data?: IpoPremiumRow[];
+};
+
+export type IpoPremiumPage = {
+  ipos: Ipo[];
+  total: number;
 };
 
 function slugify(value: string) {
@@ -160,6 +186,138 @@ async function fetchHtml(url: string) {
   }
 }
 
+function responseCookies(response: Response) {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  const values = headers.getSetCookie?.() ?? [headers.get("set-cookie") ?? ""];
+
+  return values
+    .flatMap((value) => value.split(/,(?=[^;,]+=)/))
+    .map((value) => value.split(";", 1)[0]?.trim())
+    .filter(Boolean)
+    .join("; ");
+}
+
+function ipoMarketFromName(value: string): IpoMarket {
+  return /\bsme\b/i.test(value) ? "SME" : "Mainboard";
+}
+
+function ipoPremiumName(value: string) {
+  const text = cheerio.load(value).text().replace(/\s+/g, " ").trim();
+  const name = text
+    .replace(/\s*\((?:mainboard|(?:bse|nse)\s+sme|sme)\)\s*$/i, "")
+    .replace(/\s+(?:limited|ltd\.?)\s*$/i, "")
+    .replace(/\s+ipo\s*$/i, "")
+    .trim();
+
+  return name ? `${name} IPO` : "";
+}
+
+function normalizeIpoPremium(row: IpoPremiumRow, fetchedAt: string): Ipo | null {
+  const rawName = cheerio.load(row.name ?? "").text().replace(/\s+/g, " ").trim();
+  const name = ipoPremiumName(row.name ?? "");
+  if (!name) return null;
+
+  const status = statusFrom(row.current_status ?? undefined);
+  const openDate = isoDate(row.open ?? undefined);
+  const closeDate = isoDate(row.close ?? undefined);
+  const allotmentDate = isoDate(row.allotment_date ?? undefined);
+  const issuePriceMin = numberFrom(row.min_price);
+  const issuePriceMax = numberFrom(row.max_price) || issuePriceMin;
+
+  return {
+    id: `ipopremium-${row.id ?? slugify(`${name}-${openDate}`)}`,
+    name,
+    symbol: row.script_code?.trim() || undefined,
+    marketType: ipoMarketFromName(rawName),
+    issuePriceMin: issuePriceMin || undefined,
+    issuePriceMax,
+    lotSize: numberFrom(row.lot_size),
+    openDate,
+    closeDate,
+    allotmentDate,
+    listingDate: isoDate(row.listing_date ?? undefined),
+    registrar: "Registrar to confirm",
+    status,
+    allotmentAvailability: availabilityFrom(status, allotmentDate),
+    gmp: numberFrom(row.premium),
+    gmpLastUpdated: fetchedAt,
+    dataSource: "IPO Premium"
+  };
+}
+
+export async function fetchIpoPremiumIposPage({
+  status = "all",
+  start = 0,
+  length = 100
+}: {
+  status?: "all" | "open" | "upcoming" | "closed";
+  start?: number;
+  length?: number;
+} = {}): Promise<IpoPremiumPage> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  const userAgent = "Mozilla/5.0 (compatible; IPO Fast Check/1.0; +https://ipoinfo.online)";
+
+  try {
+    const pageResponse = await fetch("https://dash.ipopremium.in/", {
+      headers: { "User-Agent": userAgent },
+      signal: controller.signal,
+      cache: "no-store"
+    });
+
+    if (!pageResponse.ok) {
+      throw new Error(`IPO Premium page returned ${pageResponse.status}`);
+    }
+
+    const html = await pageResponse.text();
+    const token = html.match(/d\._token\s*=\s*['\"]([^'\"]+)['\"]/i)?.[1];
+    if (!token) throw new Error("IPO Premium session token was unavailable");
+
+    const body = new URLSearchParams({
+      draw: "1",
+      start: String(Math.max(0, start)),
+      length: String(Math.min(100, Math.max(1, length))),
+      _token: token,
+      all: "true",
+      eq: "false",
+      sme: "false",
+      all_ipos: String(status === "all"),
+      upcoming_ipos: String(status === "upcoming"),
+      open_ipos: String(status === "open"),
+      closed_ipos: String(status === "closed")
+    });
+    const dataResponse = await fetch("https://dash.ipopremium.in/ipo", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "User-Agent": userAgent,
+        "X-Requested-With": "XMLHttpRequest",
+        Cookie: responseCookies(pageResponse)
+      },
+      body,
+      signal: controller.signal,
+      cache: "no-store"
+    });
+
+    if (!dataResponse.ok) {
+      throw new Error(`IPO Premium data returned ${dataResponse.status}`);
+    }
+
+    const payload = (await dataResponse.json()) as IpoPremiumPayload;
+    const fetchedAt = new Date().toISOString();
+    const ipos = (payload.data ?? [])
+      .map((row) => normalizeIpoPremium(row, fetchedAt))
+      .filter(Boolean) as Ipo[];
+
+    return {
+      ipos,
+      total: payload.recordsFiltered ?? payload.recordsTotal ?? ipos.length
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function parseListing(value: string, price: number, gmp: number) {
   const listing = numberFrom(value);
   const percentMatch = value.match(/\((-?\d+(\.\d+)?)%\)/);
@@ -189,6 +347,11 @@ function monthIndexFromName(value: string) {
   return monthNames.findIndex((month) => lower.includes(month.slice(0, 3)));
 }
 
+function dateOnly(year: number, monthIndex: number, day: number) {
+  const month = String(monthIndex + 1).padStart(2, "0");
+  return `${year}-${month}-${String(day).padStart(2, "0")}`;
+}
+
 function yearAwareRange(value: string) {
   const today = new Date();
   const years = value.match(/\b20\d{2}\b/g)?.map(Number) ?? [];
@@ -201,7 +364,7 @@ function yearAwareRange(value: string) {
         const monthIndex = monthIndexFromName(piece);
         const day = Number(piece.match(/\d{1,2}/)?.[0] ?? 0);
         return monthIndex >= 0 && day
-          ? new Date(explicitYear, monthIndex, day)
+          ? new Date(Date.UTC(explicitYear, monthIndex, day))
           : null;
       })
       .filter(Boolean) as Date[];
@@ -211,7 +374,7 @@ function yearAwareRange(value: string) {
       const close = parsed[parsed.length - 1];
 
       if (parsed.length > 1 && close < open) {
-        open.setFullYear(open.getFullYear() - 1);
+        open.setUTCFullYear(open.getUTCFullYear() - 1);
       }
 
       return {
@@ -234,8 +397,8 @@ function yearAwareRange(value: string) {
   const startDay = numbers[0];
   const endDay = numbers[numbers.length - 1];
   const startMonth = endDay < startDay ? monthIndex - 1 : monthIndex;
-  const start = new Date(explicitYear, startMonth, startDay);
-  const end = new Date(explicitYear, monthIndex, endDay);
+  const start = new Date(Date.UTC(explicitYear, startMonth, startDay));
+  const end = new Date(Date.UTC(explicitYear, monthIndex, endDay));
 
   return {
     openDate: start.toISOString().slice(0, 10),
@@ -248,7 +411,7 @@ function estimateAllotmentDate(closeDate: string, status: IpoStatus) {
   const close = new Date(closeDate);
   if (Number.isNaN(close.getTime())) return "";
   const offset = status === "listed" ? 2 : 3;
-  close.setDate(close.getDate() + offset);
+  close.setUTCDate(close.getUTCDate() + offset);
   return close.toISOString().slice(0, 10);
 }
 
@@ -256,13 +419,13 @@ function estimateListingDate(closeDate: string) {
   if (!closeDate) return "";
   const close = new Date(closeDate);
   if (Number.isNaN(close.getTime())) return "";
-  close.setDate(close.getDate() + 5);
+  close.setUTCDate(close.getUTCDate() + 5);
   return close.toISOString().slice(0, 10);
 }
 
 function addDays(value: Date, days: number) {
   const date = new Date(value);
-  date.setDate(date.getDate() + days);
+  date.setUTCDate(date.getUTCDate() + days);
   return date;
 }
 
@@ -291,6 +454,10 @@ function normalizeKey(name: string) {
     .replace(/\bsolutions\b/g, "")
     .replace(/\bpvt\b/g, "")
     .replace(/\bprivate\b/g, "")
+    .replace(/\bmainboard\b/g, "")
+    .replace(/\bbse\b/g, "")
+    .replace(/\bnse\b/g, "")
+    .replace(/\beq\b/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
@@ -299,8 +466,15 @@ function isoDate(value?: string) {
   if (!value) return "";
   if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
 
+  const monthIndex = monthIndexFromName(value);
+  const year = Number(value.match(/\b20\d{2}\b/)?.[0] ?? 0);
+  const day = Number(value.match(/\b\d{1,2}\b/)?.[0] ?? 0);
+  if (monthIndex >= 0 && year && day) return dateOnly(year, monthIndex, day);
+
   const parsed = new Date(value.replace(/Sept/i, "Sep").replace(",", ""));
-  return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+  return Number.isNaN(parsed.getTime())
+    ? ""
+    : dateOnly(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
 }
 
 function recentWindowStart() {
@@ -361,6 +535,7 @@ function rowToIpo(row: IpoWatchParsedRow): Ipo {
   return {
     id: slugify(`${row.name}-${range.openDate || row.section}`),
     name: `${row.name} IPO`,
+    marketType: row.section,
     issuePriceMax: row.price,
     lotSize: 0,
     openDate: range.openDate,
@@ -378,15 +553,13 @@ function rowToIpo(row: IpoWatchParsedRow): Ipo {
 
 function calendarRowToIpo(cells: string[]): Ipo | null {
   const name = cells[0]?.replace(/\s+IPO$/i, "").trim();
-  const open = new Date(cells[1]);
-  const close = new Date(cells[2]);
+  const openDate = isoDate(cells[1]);
+  const closeDate = isoDate(cells[2]);
 
-  if (!name || Number.isNaN(open.getTime()) || Number.isNaN(close.getTime())) {
+  if (!name || !openDate || !closeDate) {
     return null;
   }
 
-  const openDate = open.toISOString().slice(0, 10);
-  const closeDate = close.toISOString().slice(0, 10);
   const status = statusFromDates(openDate, closeDate);
   const allotmentDate = estimateAllotmentDate(closeDate, status);
   const issuePriceMax = upperPrice(cells[5], null);
@@ -394,6 +567,7 @@ function calendarRowToIpo(cells: string[]): Ipo | null {
   return {
     id: slugify(`${name}-${openDate}`),
     name: `${name} IPO`,
+    marketType: ipoMarketFromName(name),
     issuePriceMax,
     lotSize: 0,
     openDate,
@@ -823,15 +997,21 @@ function mergeIpos(primary: Ipo[], secondary: Ipo[]) {
     merged.set(key, {
       ...(existing ?? {}),
       ...ipo,
+      marketType: existing?.marketType ?? ipo.marketType,
       openDate: existing?.openDate || ipo.openDate || "",
       closeDate: existing?.closeDate || ipo.closeDate || "",
       allotmentDate: existing?.allotmentDate || ipo.allotmentDate,
       listingDate: existing?.listingDate || ipo.listingDate,
+      issuePriceMin: existing?.issuePriceMin || ipo.issuePriceMin,
       issuePriceMax: ipo.issuePriceMax || existing?.issuePriceMax || 0,
+      lotSize: existing?.lotSize || ipo.lotSize || 0,
       status: ipo.status || existing?.status || "upcoming",
       allotmentAvailability:
         existing?.allotmentAvailability ?? ipo.allotmentAvailability,
-      dataSource: "IPOWatch"
+      dataSource: [existing?.dataSource, ipo.dataSource]
+        .filter(Boolean)
+        .filter((source, index, sources) => sources.indexOf(source) === index)
+        .join(" + ")
     });
   }
 
@@ -855,10 +1035,7 @@ function mergeAllotmentInfo(ipos: Ipo[], allotments: IpoWatchAllotmentRow[]) {
 
     if (!row) return ipo;
 
-    const parsedAllotment = new Date(row.allotmentDate.replace(",", ""));
-    const allotmentDate = Number.isNaN(parsedAllotment.getTime())
-      ? ipo.allotmentDate
-      : parsedAllotment.toISOString().slice(0, 10);
+    const allotmentDate = isoDate(row.allotmentDate) || ipo.allotmentDate;
 
     return {
       ...ipo,
@@ -950,8 +1127,15 @@ export async function fetchIpoAlertsIpos(apiKey: string) {
 }
 
 export async function fetchIpoWatchIpos() {
+  const ipoPremiumPromise = fetchIpoPremiumIposPage({ length: 100 }).catch(() => ({
+    ipos: [] as Ipo[],
+    total: 0
+  }));
+  const ipoJiPromise = fetchIpoJiIpos().catch(() => [] as Ipo[]);
   const [gmpHtml, allotmentHtml, ipo360Html, ...calendarResults] = await Promise.all([
-    fetchHtml("https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/"),
+    fetchHtml("https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/").catch(
+      () => ""
+    ),
     fetchHtml("https://ipowatch.in/ipo-allotment-status-how-to-check/").catch(
       () => ""
     ),
@@ -960,22 +1144,25 @@ export async function fetchIpoWatchIpos() {
       fetchHtml(url).catch(() => "")
     )
   ]);
-  const gmpIpos = parseIpoWatchRows(gmpHtml).map(rowToIpo);
+  const gmpIpos = gmpHtml ? parseIpoWatchRows(gmpHtml).map(rowToIpo) : [];
   const calendarIpos = calendarResults.flatMap((html) =>
     html ? parseIpoWatchCalendarRows(html) : []
   );
-  const ipoJiIpos = await fetchIpoJiIpos().catch(() => []);
+  const [ipoJiIpos, ipoPremiumPage] = await Promise.all([
+    ipoJiPromise,
+    ipoPremiumPromise
+  ]);
   const allotments = [
     ...(allotmentHtml ? parseIpoWatchAllotmentRows(allotmentHtml) : []),
     ...(ipo360Html ? parseIpo360AllotmentRows(ipo360Html) : [])
   ];
   const merged = mergeAllotmentInfo(
-    mergeIpos(gmpIpos, [...calendarIpos, ...ipoJiIpos]),
+    mergeIpos(gmpIpos, [...calendarIpos, ...ipoJiIpos, ...ipoPremiumPage.ipos]),
     allotments
   );
 
   if (!merged.length) {
-    throw new Error("IPOWatch returned no IPO rows");
+    throw new Error("All live IPO sources returned no rows");
   }
 
   return merged;

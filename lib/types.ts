@@ -5,6 +5,8 @@ export type IpoStatus =
   | "listing_soon"
   | "listed";
 
+export type IpoMarket = "Mainboard" | "SME";
+
 export type AllotmentAvailability =
   | "available"
   | "expected_soon"
@@ -25,6 +27,7 @@ export type Ipo = {
   id: string;
   name: string;
   symbol?: string;
+  marketType?: IpoMarket;
   issuePriceMin?: number;
   issuePriceMax: number;
   lotSize: number;
@@ -79,7 +82,7 @@ export type GmpRow = Ipo & {
 };
 
 export type ProviderMeta = {
-  source: "ipowatch" | "ipoguru" | "ipoalerts" | "mock";
+  source: "multi-source" | "ipowatch" | "ipoguru" | "ipoalerts" | "mock";
   isLive: boolean;
   message: string;
   fetchedAt: string;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
@@ -20,6 +20,13 @@ function rupee(value: number) {
     currency: "INR",
     maximumFractionDigits: 0
   }).format(value);
+}
+
+function priceBand(ipo: Ipo) {
+  const minimum = ipo.issuePriceMin ?? ipo.issuePriceMax;
+  if (!minimum && !ipo.issuePriceMax) return "TBA";
+  if (minimum === ipo.issuePriceMax) return rupee(ipo.issuePriceMax);
+  return `${rupee(minimum)} - ${rupee(ipo.issuePriceMax)}`;
 }
 
 function timeLabel(value?: string) {
@@ -164,6 +171,13 @@ export default function Home() {
   const [captchas, setCaptchas] = useState<Record<string, CaptchaState>>({});
   const [gmpSearch, setGmpSearch] = useState("");
   const [gmpFilter, setGmpFilter] = useState<(typeof gmpFilters)[number]>("open");
+  const [closedGmpRows, setClosedGmpRows] = useState<GmpRow[]>([]);
+  const [closedTotal, setClosedTotal] = useState(0);
+  const [closedNextOffset, setClosedNextOffset] = useState(0);
+  const [closedLoaded, setClosedLoaded] = useState(false);
+  const [closedLoading, setClosedLoading] = useState(false);
+  const [closedError, setClosedError] = useState("");
+  const closedRequestInFlight = useRef(false);
 
   useEffect(() => {
     async function loadData() {
@@ -193,15 +207,23 @@ export default function Home() {
     loadData();
   }, []);
 
+  useEffect(() => {
+    if (activeTab === "gmp" && gmpFilter === "closed" && !closedLoaded) {
+      void loadClosedHistory(true);
+    }
+  }, [activeTab, closedLoaded, gmpFilter]);
+
   const filteredGmp = useMemo(() => {
-    return sortGmpRows(gmpRows.filter((row) => {
+    const sourceRows = gmpFilter === "closed" && closedLoaded ? closedGmpRows : gmpRows;
+
+    return sortGmpRows(sourceRows.filter((row) => {
       const matchesFilter = gmpGroup(row) === gmpFilter;
       const matchesSearch = row.name
         .toLowerCase()
         .includes(gmpSearch.trim().toLowerCase());
       return matchesFilter && matchesSearch;
     }));
-  }, [gmpFilter, gmpRows, gmpSearch]);
+  }, [closedGmpRows, closedLoaded, gmpFilter, gmpRows, gmpSearch]);
 
   const selectedIpo = ipos.find((ipo) => ipo.id === selectedIpoId);
   const allotmentIpos = useMemo(
@@ -237,6 +259,48 @@ export default function Home() {
         unavailableChecks: nextResults.length - successfulChecks - failedChecks
       };
     });
+  }
+
+  async function loadClosedHistory(reset = false) {
+    if (closedRequestInFlight.current) return;
+
+    closedRequestInFlight.current = true;
+    setClosedLoading(true);
+    setClosedError("");
+    const offset = reset ? 0 : closedNextOffset;
+
+    try {
+      const response = await fetch(`/api/gmp/history?offset=${offset}&limit=50`, {
+        cache: "no-store"
+      });
+      const data = (await response.json()) as {
+        gmp?: GmpRow[];
+        total?: number;
+        nextOffset?: number;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Closed IPO history is temporarily unavailable.");
+      }
+
+      setClosedGmpRows((current) => {
+        const rows = reset ? [] : current;
+        const merged = new Map(rows.map((row) => [row.id, row]));
+        for (const row of data.gmp ?? []) merged.set(row.id, row);
+        return sortGmpRows(Array.from(merged.values()));
+      });
+      setClosedTotal(data.total ?? 0);
+      setClosedNextOffset(data.nextOffset ?? offset + (data.gmp?.length ?? 0));
+      setClosedLoaded(true);
+    } catch (error) {
+      setClosedError(
+        error instanceof Error ? error.message : "Closed IPO history is temporarily unavailable."
+      );
+    } finally {
+      closedRequestInFlight.current = false;
+      setClosedLoading(false);
+    }
   }
 
   async function checkAllotment() {
@@ -657,7 +721,16 @@ export default function Home() {
                   {filteredGmp.map((row) => (
                     <article className="gmp-card" key={row.id}>
                       <div className="gmp-name">
-                        <strong>{row.name}</strong>
+                        <div className="gmp-title-line">
+                          <strong>{row.name}</strong>
+                          <span
+                            className={`market-tag ${
+                              row.marketType === "SME" ? "sme" : "mainboard"
+                            }`}
+                          >
+                            {row.marketType ?? "Mainboard"}
+                          </span>
+                        </div>
                         <p>
                           {statusLabel(gmpGroup(row))} • Updated{" "}
                           {timeLabel(row.gmpLastUpdated)}
@@ -669,8 +742,14 @@ export default function Home() {
                         </div>
                       </div>
                       <div className="gmp-cell">
-                        <span>Price</span>
-                        <strong>{rupee(row.issuePriceMax)}</strong>
+                        <span>Price Band</span>
+                        <strong>{priceBand(row)}</strong>
+                      </div>
+                      <div className="gmp-cell">
+                        <span>Lot Size</span>
+                        <strong>
+                          {row.lotSize ? row.lotSize.toLocaleString("en-IN") : "TBA"}
+                        </strong>
                       </div>
                       <div className="gmp-cell">
                         <span>GMP</span>
@@ -691,10 +770,34 @@ export default function Home() {
                       </div>
                     </article>
                   ))}
+                  {gmpFilter === "closed" && closedLoaded ? (
+                    <div className="history-footer">
+                      <span>
+                        Showing {closedGmpRows.length.toLocaleString("en-IN")} of{" "}
+                        {closedTotal.toLocaleString("en-IN")}
+                      </span>
+                      {closedNextOffset < closedTotal ? (
+                        <button
+                          className="secondary compact-button"
+                          disabled={closedLoading}
+                          onClick={() => loadClosedHistory(false)}
+                          type="button"
+                        >
+                          {closedLoading ? "Loading..." : "Load More"}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               ) : (
-                <div className="empty">No GMP rows match this view.</div>
+                <div className="empty">
+                  {closedLoading ? "Loading closed IPO history..." : "No GMP rows match this view."}
+                </div>
               )}
+
+              {closedError && gmpFilter === "closed" ? (
+                <p className="error-text">{closedError}</p>
+              ) : null}
 
               <div className="disclaimer">
                 GMP is unofficial market information and does not guarantee listing price or return.

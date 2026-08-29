@@ -729,7 +729,7 @@ h3 {
 
 .gmp-card {
   display: grid;
-  grid-template-columns: minmax(260px, 1.35fr) repeat(4, minmax(82px, 0.5fr));
+  grid-template-columns: minmax(250px, 1.25fr) repeat(5, minmax(82px, 0.48fr));
   gap: 10px;
   align-items: center;
   padding: 14px;
@@ -737,6 +737,34 @@ h3 {
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 8px 26px rgba(25, 23, 19, 0.05);
+}
+
+.gmp-title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.market-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid #bac9d6;
+  border-radius: 6px;
+  padding: 2px 6px;
+  color: #27475f;
+  background: #eef5f9;
+  font-size: 0.68rem;
+  font-weight: 850;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.market-tag.sme {
+  border-color: #d5b9c1;
+  color: #713145;
+  background: #fbf0f3;
 }
 
 .gmp-name p,
@@ -771,6 +799,17 @@ h3 {
 
 .positive {
   color: var(--success);
+}
+
+.history-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 2px 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 750;
 }
 
 .disclaimer {
@@ -816,6 +855,10 @@ h3 {
 
   .gmp-name {
     grid-column: 1 / -1;
+  }
+
+  .history-footer {
+    flex-wrap: wrap;
   }
 }
 

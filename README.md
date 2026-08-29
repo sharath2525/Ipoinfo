@@ -24,8 +24,11 @@ Open `http://localhost:3000`.
 The app uses free public sources by default:
 
 - IPOWatch for live GMP and IPO calendar rows.
+- IPO Premium's public dashboard for Mainboard/SME classification, price bands, lot sizes, listing dates, and paged closed history.
 - IPO360 for recent allotment release status.
 - IPO Ji as a fallback for recently listed IPOs that one source misses.
+
+The field-level priority and fallback rules are documented in [DATA_SOURCES.md](./DATA_SOURCES.md).
 
 Optional: add one server-side API key in `.env.local` if you later want an API provider:
 
@@ -53,15 +56,14 @@ Without a key, the app still uses the live public sources. Demo data is used onl
 
 Vercel Hobby is enough for the first version. Upgrade later only if traffic or commercial usage requires it.
 
-## Scraping note
+## Source reliability note
 
-Do not make the production website depend on scraping as the primary data source.
-Public blog pages can change layout, return empty client-side tables, or block server traffic.
-Use scraping only as a backup cache job if the source permits it. The safer primary setup is a fintech API key.
+Public sources can change layout or temporarily block traffic. The app therefore merges multiple sources, uses timeouts, and keeps working when one source fails. A permitted fintech API remains the best future upgrade for guaranteed service levels.
 
 ## Current behavior
 
-- IPO and GMP lists use the previous month, current month, next month, and upcoming IPOs.
+- Open and Upcoming use live merged rows. Closed history is loaded newest-first in pages so older IPOs remain available.
+- Every GMP card shows Mainboard/SME, full price band, lot size, open date, close date, and listing date.
 - IPOWatch GMP is fetched from the live GMP page.
 - Previous/current/next month IPO calendars are merged in so completed IPOs are available for allotment selection.
 - IPOWatch, IPO360, and IPO Ji allotment data are merged in so recent completed IPOs show live release updates such as "Out: 28 Aug, 10:30 PM" or "Due Today".

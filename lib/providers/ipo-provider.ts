@@ -30,9 +30,9 @@ export class MockIpoDataProvider implements IpoDataProvider {
 export class IpoWatchDataProvider implements IpoDataProvider {
   getMeta(): ProviderMeta {
     return {
-      source: "ipowatch",
+      source: "multi-source",
       isLive: true,
-      message: "Live IPO and GMP data loaded from IPOWatch.",
+      message: "Live IPO data merged from multiple available sources.",
       fetchedAt: new Date().toISOString()
     };
   }
