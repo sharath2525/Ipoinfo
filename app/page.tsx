@@ -4,8 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
-const gmpFilters = ["all", "upcoming", "open", "closed", "listing_soon", "listed"] as const;
-
 type CaptchaState = {
   token?: string;
   image?: string;
@@ -96,20 +94,7 @@ function dateTime(value?: string) {
 }
 
 function sortGmpRows(rows: GmpRow[]) {
-  const statusPriority: Record<string, number> = {
-    open: 0,
-    upcoming: 1,
-    closed: 2,
-    listing_soon: 3,
-    listed: 4
-  };
-
   return [...rows].sort((first, second) => {
-    const priority =
-      (statusPriority[first.status] ?? 5) - (statusPriority[second.status] ?? 5);
-
-    if (priority !== 0) return priority;
-
     if (first.status === "upcoming") {
       return dateTime(first.openDate) - dateTime(second.openDate);
     }
@@ -119,6 +104,18 @@ function sortGmpRows(rows: GmpRow[]) {
       dateTime(second.listingDate) - dateTime(first.listingDate)
     );
   });
+}
+
+function gmpGroup(row: GmpRow): "open" | "upcoming" | "closed" {
+  if (row.status === "open") return "open";
+  if (row.status === "upcoming") return "upcoming";
+  return "closed";
+}
+
+function groupTitle(group: "open" | "upcoming" | "closed") {
+  if (group === "open") return "Open IPOs";
+  if (group === "upcoming") return "Upcoming IPOs";
+  return "Recently Closed IPOs";
 }
 
 function isCompletedIpo(ipo: Ipo) {
@@ -170,7 +167,6 @@ export default function Home() {
   const [results, setResults] = useState<BatchCheckResponse | null>(null);
   const [captchas, setCaptchas] = useState<Record<string, CaptchaState>>({});
   const [gmpSearch, setGmpSearch] = useState("");
-  const [gmpFilter, setGmpFilter] = useState<(typeof gmpFilters)[number]>("all");
 
   useEffect(() => {
     async function loadData() {
@@ -202,13 +198,20 @@ export default function Home() {
 
   const filteredGmp = useMemo(() => {
     return sortGmpRows(gmpRows.filter((row) => {
-      const matchesFilter = gmpFilter === "all" || row.status === gmpFilter;
       const matchesSearch = row.name
         .toLowerCase()
         .includes(gmpSearch.trim().toLowerCase());
-      return matchesFilter && matchesSearch;
+      return matchesSearch;
     }));
-  }, [gmpFilter, gmpRows, gmpSearch]);
+  }, [gmpRows, gmpSearch]);
+
+  const groupedGmp = useMemo(() => {
+    return {
+      open: filteredGmp.filter((row) => gmpGroup(row) === "open"),
+      upcoming: filteredGmp.filter((row) => gmpGroup(row) === "upcoming"),
+      closed: filteredGmp.filter((row) => gmpGroup(row) === "closed")
+    };
+  }, [filteredGmp]);
 
   const selectedIpo = ipos.find((ipo) => ipo.id === selectedIpoId);
   const allotmentIpos = useMemo(
@@ -645,58 +648,59 @@ export default function Home() {
                   placeholder="Search IPO"
                   aria-label="Search IPO"
                 />
-                <div className="filters" aria-label="GMP filters">
-                  {gmpFilters.map((filter) => (
-                    <button
-                      className={`filter ${gmpFilter === filter ? "active" : ""}`}
-                      key={filter}
-                      onClick={() => setGmpFilter(filter)}
-                      type="button"
-                    >
-                      {statusLabel(filter)}
-                    </button>
-                  ))}
-                </div>
               </div>
 
               {filteredGmp.length ? (
-                <div className="gmp-list">
-                  {filteredGmp.map((row) => (
-                    <article className="gmp-card" key={row.id}>
-                      <div className="gmp-name">
-                        <strong>{row.name}</strong>
-                        <p>
-                          {statusLabel(row.status)} • Updated {timeLabel(row.gmpLastUpdated)}
-                        </p>
-                        <div className="date-strip">
-                          <span>Open {dateLabel(row.openDate)}</span>
-                          <span>Close {dateLabel(row.closeDate)}</span>
-                          <span>List {dateLabel(row.listingDate)}</span>
+                <div className="gmp-sections">
+                  {(["open", "upcoming", "closed"] as const).map((group) =>
+                    groupedGmp[group].length ? (
+                      <section className="gmp-section" key={group}>
+                        <div className="gmp-section-head">
+                          <h3>{groupTitle(group)}</h3>
+                          <span>{groupedGmp[group].length}</span>
                         </div>
-                      </div>
-                      <div className="gmp-cell">
-                        <span>Price</span>
-                        <strong>{rupee(row.issuePriceMax)}</strong>
-                      </div>
-                      <div className="gmp-cell">
-                        <span>GMP</span>
-                        <strong className={row.gmp >= 0 ? "positive" : ""}>
-                          {rupee(row.gmp)}
-                        </strong>
-                      </div>
-                      <div className="gmp-cell">
-                        <span>GMP %</span>
-                        <strong className={row.gmpPercent >= 0 ? "positive" : ""}>
-                          {row.gmpPercent >= 0 ? "+" : ""}
-                          {row.gmpPercent.toFixed(1)}%
-                        </strong>
-                      </div>
-                      <div className="gmp-cell">
-                        <span>Est. Listing</span>
-                        <strong>{rupee(row.estimatedListingPrice)}</strong>
-                      </div>
-                    </article>
-                  ))}
+                        <div className="gmp-list">
+                          {groupedGmp[group].map((row) => (
+                            <article className="gmp-card" key={row.id}>
+                              <div className="gmp-name">
+                                <strong>{row.name}</strong>
+                                <p>
+                                  {statusLabel(gmpGroup(row))} • Updated{" "}
+                                  {timeLabel(row.gmpLastUpdated)}
+                                </p>
+                                <div className="date-strip">
+                                  <span>Open {dateLabel(row.openDate)}</span>
+                                  <span>Close {dateLabel(row.closeDate)}</span>
+                                  <span>List {dateLabel(row.listingDate)}</span>
+                                </div>
+                              </div>
+                              <div className="gmp-cell">
+                                <span>Price</span>
+                                <strong>{rupee(row.issuePriceMax)}</strong>
+                              </div>
+                              <div className="gmp-cell">
+                                <span>GMP</span>
+                                <strong className={row.gmp >= 0 ? "positive" : ""}>
+                                  {rupee(row.gmp)}
+                                </strong>
+                              </div>
+                              <div className="gmp-cell">
+                                <span>GMP %</span>
+                                <strong className={row.gmpPercent >= 0 ? "positive" : ""}>
+                                  {row.gmpPercent >= 0 ? "+" : ""}
+                                  {row.gmpPercent.toFixed(1)}%
+                                </strong>
+                              </div>
+                              <div className="gmp-cell">
+                                <span>Est. Listing</span>
+                                <strong>{rupee(row.estimatedListingPrice)}</strong>
+                              </div>
+                            </article>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null
+                  )}
                 </div>
               ) : (
                 <div className="empty">No GMP rows match this view.</div>
