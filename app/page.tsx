@@ -6,6 +6,8 @@ import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/typ
 
 const gmpFilters = ["open", "upcoming", "closed"] as const;
 const closedPageSizes = [25, 50, 100] as const;
+const RECENT_IPOS_KEY = "ipo-fast-check:recent-ipos";
+const REMEMBERED_PAN_KEY = "ipo-fast-check:remembered-pan";
 
 type CaptchaState = {
   token?: string;
@@ -166,12 +168,12 @@ function isLastOrThisMonthResult(ipo: Ipo) {
 function recentResultsFirst(ipos: Ipo[]) {
   return [...ipos].sort((first, second) => {
     const firstTime =
-      parseDate(first.allotmentDate)?.getTime() ??
       parseDate(first.closeDate)?.getTime() ??
+      parseDate(first.allotmentDate)?.getTime() ??
       0;
     const secondTime =
-      parseDate(second.allotmentDate)?.getTime() ??
       parseDate(second.closeDate)?.getTime() ??
+      parseDate(second.allotmentDate)?.getTime() ??
       0;
 
     return secondTime - firstTime;
@@ -189,8 +191,14 @@ export default function Home() {
   const [ipos, setIpos] = useState<Ipo[]>([]);
   const [gmpRows, setGmpRows] = useState<GmpRow[]>([]);
   const [selectedIpoId, setSelectedIpoId] = useState("");
+  const [ipoSearch, setIpoSearch] = useState("");
+  const [ipoMenuOpen, setIpoMenuOpen] = useState(false);
+  const [recentIpoIds, setRecentIpoIds] = useState<string[]>([]);
   const [panInput, setPanInput] = useState("");
   const [panError, setPanError] = useState("");
+  const [rememberPan, setRememberPan] = useState(false);
+  const [restoredPan, setRestoredPan] = useState(false);
+  const [panCopied, setPanCopied] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [checkError, setCheckError] = useState("");
   const [checking, setChecking] = useState(false);
@@ -207,6 +215,32 @@ export default function Home() {
   const [closedError, setClosedError] = useState("");
   const closedRequestId = useRef(0);
   const gmpResultsTop = useRef<HTMLDivElement>(null);
+  const ipoSearchInput = useRef<HTMLInputElement>(null);
+  const panInputElement = useRef<HTMLInputElement>(null);
+  const autoCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCheckKey = useRef("");
+
+  useEffect(() => {
+    try {
+      const savedRecent = JSON.parse(localStorage.getItem(RECENT_IPOS_KEY) ?? "[]");
+      if (Array.isArray(savedRecent)) {
+        setRecentIpoIds(savedRecent.filter((value): value is string => typeof value === "string"));
+      }
+
+      const savedPan = normalizePan(localStorage.getItem(REMEMBERED_PAN_KEY) ?? "");
+      if (isValidPan(savedPan)) {
+        setPanInput(savedPan);
+        setRememberPan(true);
+        setRestoredPan(true);
+      }
+    } catch {
+      // Browser storage can be unavailable in private or restricted modes.
+    }
+
+    return () => {
+      if (autoCheckTimer.current) clearTimeout(autoCheckTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     async function loadData() {
@@ -222,7 +256,9 @@ export default function Home() {
         const allotmentChoices = recentResultsFirst(
           data.ipos.filter(isLastOrThisMonthResult)
         );
-        setSelectedIpoId(allotmentChoices[0]?.id ?? "");
+        const firstChoice = allotmentChoices[0];
+        setSelectedIpoId(firstChoice?.id ?? "");
+        setIpoSearch(firstChoice?.name ?? "");
         setGmpRows(data.gmp);
       } catch (error) {
         setLoadError(error instanceof Error ? error.message : "Could not load IPO data.");
@@ -255,6 +291,23 @@ export default function Home() {
     () => recentResultsFirst(ipos.filter(isLastOrThisMonthResult)),
     [ipos]
   );
+  const recentlyCheckedIpos = useMemo(
+    () =>
+      recentIpoIds
+        .map((id) => allotmentIpos.find((ipo) => ipo.id === id))
+        .filter((ipo): ipo is Ipo => Boolean(ipo))
+        .slice(0, 3),
+    [allotmentIpos, recentIpoIds]
+  );
+  const matchingAllotmentIpos = useMemo(() => {
+    const query = ipoSearch.trim().toLowerCase();
+    if (!query || selectedIpo?.name.toLowerCase() === query) return allotmentIpos;
+    return allotmentIpos.filter((ipo) =>
+      `${ipo.name} ${ipo.registrar}`.toLowerCase().includes(query)
+    );
+  }, [allotmentIpos, ipoSearch, selectedIpo]);
+  const showIpoLanding =
+    !ipoSearch.trim() || ipoSearch.trim().toLowerCase() === selectedIpo?.name.toLowerCase();
   const currentResult = results?.results[0];
   const currentCaptcha = currentResult ? captchas[resultKey(currentResult)] : undefined;
   const closedTotalPages = Math.max(1, Math.ceil(closedTotal / closedPageSize));
@@ -288,6 +341,37 @@ export default function Home() {
         unavailableChecks: nextResults.length - successfulChecks - failedChecks
       };
     });
+  }
+
+  function rememberCheckedIpo(ipoId: string) {
+    const nextIds = [ipoId, ...recentIpoIds.filter((id) => id !== ipoId)].slice(0, 3);
+    setRecentIpoIds(nextIds);
+    try {
+      localStorage.setItem(RECENT_IPOS_KEY, JSON.stringify(nextIds));
+    } catch {
+      // Recent IPO history is an optional convenience only.
+    }
+  }
+
+  function selectAllotmentIpo(ipo: Ipo) {
+    setSelectedIpoId(ipo.id);
+    setIpoSearch(ipo.name);
+    setIpoMenuOpen(false);
+    setResults(null);
+    setCaptchas({});
+    setCheckError("");
+    scheduleAutoCheck(panInput, ipo.id);
+    requestAnimationFrame(() => panInputElement.current?.focus());
+  }
+
+  function scheduleAutoCheck(panValue: string, ipoId: string) {
+    if (autoCheckTimer.current) clearTimeout(autoCheckTimer.current);
+    const pan = normalizePan(panValue);
+    if (!ipoId || !isValidPan(pan)) return;
+
+    autoCheckTimer.current = setTimeout(() => {
+      void checkAllotment(pan, ipoId);
+    }, 100);
   }
 
   async function loadClosedHistory(page: number, pageSize: number) {
@@ -330,15 +414,21 @@ export default function Home() {
     }
   }
 
-  async function checkAllotment() {
+  async function checkAllotment(
+    panValue = panInput,
+    ipoId = selectedIpoId,
+    force = false
+  ) {
+    if (autoCheckTimer.current) clearTimeout(autoCheckTimer.current);
     setCheckError("");
     setPanError("");
     setResults(null);
     setCaptchas({});
 
-    const pan = normalizePan(panInput);
+    const pan = normalizePan(panValue);
+    const checkKey = `${ipoId}:${pan}`;
 
-    if (!selectedIpoId) {
+    if (!ipoId) {
       setCheckError("Select one IPO.");
       return;
     }
@@ -353,14 +443,18 @@ export default function Home() {
       return;
     }
 
+    if (checking || (!force && lastCheckKey.current === checkKey)) return;
+
     setPanInput(pan);
+    setRestoredPan(false);
     setChecking(true);
+    lastCheckKey.current = checkKey;
 
     try {
       const response = await fetch("/api/allotment/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pans: [pan], ipoIds: [selectedIpoId] })
+        body: JSON.stringify({ pans: [pan], ipoIds: [ipoId] })
       });
       const data = await response.json();
 
@@ -369,11 +463,70 @@ export default function Home() {
       }
 
       setResults(data as BatchCheckResponse);
+      rememberCheckedIpo(ipoId);
+      if (rememberPan) {
+        try {
+          localStorage.setItem(REMEMBERED_PAN_KEY, pan);
+        } catch {
+          // Remembering PAN is optional and may be blocked by the browser.
+        }
+      }
     } catch (error) {
+      lastCheckKey.current = "";
       setCheckError(error instanceof Error ? error.message : "Unable to complete this check.");
     } finally {
       setChecking(false);
     }
+  }
+
+  function updatePan(nextValue: string) {
+    const pan = normalizePan(nextValue).replace(/[^A-Z0-9]/g, "").slice(0, 10);
+    setPanInput(pan);
+    setPanError("");
+    setPanCopied(false);
+    setRestoredPan(false);
+    setResults(null);
+    lastCheckKey.current = "";
+    scheduleAutoCheck(pan, selectedIpoId);
+  }
+
+  function updateRememberPan(enabled: boolean) {
+    setRememberPan(enabled);
+    if (!enabled) {
+      setRestoredPan(false);
+      try {
+        localStorage.removeItem(REMEMBERED_PAN_KEY);
+      } catch {
+        // The browser may block local storage.
+      }
+    } else if (isValidPan(panInput)) {
+      try {
+        localStorage.setItem(REMEMBERED_PAN_KEY, normalizePan(panInput));
+      } catch {
+        // The browser may block local storage.
+      }
+    }
+  }
+
+  async function copyPan() {
+    if (!isValidPan(panInput)) return;
+    try {
+      await navigator.clipboard.writeText(normalizePan(panInput));
+      setPanCopied(true);
+      setTimeout(() => setPanCopied(false), 1800);
+    } catch {
+      setCheckError("Your browser did not allow clipboard access.");
+    }
+  }
+
+  function checkAnotherIpo() {
+    setResults(null);
+    setCaptchas({});
+    setCheckError("");
+    lastCheckKey.current = "";
+    setIpoMenuOpen(true);
+    setIpoSearch("");
+    requestAnimationFrame(() => ipoSearchInput.current?.focus());
   }
 
   async function loadCaptcha(result: AllotmentResult) {
@@ -515,23 +668,92 @@ export default function Home() {
                   {loadError ? <p className="error-text">{loadError}</p> : null}
 
                   <div className="selector-block">
-                    <select
-                      className="select-input"
-                      value={selectedIpoId}
-                      onChange={(event) => {
-                        setSelectedIpoId(event.target.value);
-                        setResults(null);
-                        setCaptchas({});
-                      }}
-                      aria-label="Select IPO"
-                    >
-                      <option value="">Select IPO</option>
-                      {allotmentIpos.map((ipo) => (
-                        <option key={ipo.id} value={ipo.id}>
-                          {ipo.name} - {ipo.allotmentStatusText || statusLabel(ipo.allotmentAvailability)}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="ipo-combobox">
+                      <input
+                        ref={ipoSearchInput}
+                        className="ipo-search-input"
+                        value={ipoSearch}
+                        onChange={(event) => {
+                          setIpoSearch(event.target.value);
+                          setIpoMenuOpen(true);
+                          if (event.target.value !== selectedIpo?.name) {
+                            setSelectedIpoId("");
+                            setResults(null);
+                          }
+                        }}
+                        onFocus={() => setIpoMenuOpen(true)}
+                        onBlur={() => setTimeout(() => setIpoMenuOpen(false), 160)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") setIpoMenuOpen(false);
+                          if (event.key === "Enter" && matchingAllotmentIpos[0]) {
+                            event.preventDefault();
+                            selectAllotmentIpo(matchingAllotmentIpos[0]);
+                          }
+                        }}
+                        placeholder="Search recently closed IPO"
+                        role="combobox"
+                        aria-label="Search and select IPO"
+                        aria-controls="ipo-suggestions"
+                        aria-expanded={ipoMenuOpen}
+                        aria-autocomplete="list"
+                        autoComplete="off"
+                      />
+
+                      {ipoMenuOpen ? (
+                        <div className="ipo-suggestions" id="ipo-suggestions" role="listbox">
+                          {showIpoLanding && recentlyCheckedIpos.length ? (
+                            <div className="ipo-suggestion-group">
+                              <span className="suggestion-heading">Recently checked</span>
+                              {recentlyCheckedIpos.map((ipo) => (
+                                <button
+                                  className="ipo-suggestion recent"
+                                  key={`recent-${ipo.id}`}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={() => selectAllotmentIpo(ipo)}
+                                  role="option"
+                                  aria-selected={ipo.id === selectedIpoId}
+                                  type="button"
+                                >
+                                  <strong>{ipo.name}</strong>
+                                  <span>Closed {dateLabel(ipo.closeDate)}</span>
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+
+                          <div className="ipo-suggestion-group">
+                            <span className="suggestion-heading">
+                              {showIpoLanding ? "Recently closed" : "Matching IPOs"}
+                            </span>
+                            {matchingAllotmentIpos
+                              .filter(
+                                (ipo) =>
+                                  !showIpoLanding ||
+                                  !recentlyCheckedIpos.some((recent) => recent.id === ipo.id)
+                              )
+                              .map((ipo) => (
+                                <button
+                                  className="ipo-suggestion"
+                                  key={ipo.id}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={() => selectAllotmentIpo(ipo)}
+                                  role="option"
+                                  aria-selected={ipo.id === selectedIpoId}
+                                  type="button"
+                                >
+                                  <strong>{ipo.name}</strong>
+                                  <span>
+                                    Closed {dateLabel(ipo.closeDate)} • {ipo.registrar}
+                                  </span>
+                                </button>
+                              ))}
+                            {!matchingAllotmentIpos.length ? (
+                              <p className="no-ipo-match">No recent IPO matches this search.</p>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
 
                     {selectedIpo ? (
                       <div className="selected-box">
@@ -554,30 +776,96 @@ export default function Home() {
                   <div className="section-title">
                     <h3>PAN</h3>
                   </div>
-                  <input
-                    className="text-input"
-                    value={panInput}
-                    maxLength={10}
-                    onChange={(event) => {
-                      setPanInput(normalizePan(event.target.value));
-                      setResults(null);
-                    }}
-                    placeholder="ABCDE1234F"
-                    aria-label="PAN number"
-                  />
+                  <div className="pan-control">
+                    <input
+                      ref={panInputElement}
+                      className={`text-input pan-input ${
+                        isValidPan(panInput)
+                          ? "valid"
+                          : panInput.length === 10
+                            ? "invalid"
+                            : ""
+                      }`}
+                      value={panInput}
+                      maxLength={10}
+                      onChange={(event) => updatePan(event.target.value)}
+                      onPaste={(event) => {
+                        const pastedPan = event.clipboardData.getData("text");
+                        if (pastedPan) {
+                          event.preventDefault();
+                          updatePan(pastedPan);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void checkAllotment(panInput, selectedIpoId, true);
+                        }
+                      }}
+                      placeholder="ABCDE1234F"
+                      aria-label="PAN number"
+                      aria-invalid={panInput.length === 10 && !isValidPan(panInput)}
+                      autoCapitalize="characters"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      inputMode="text"
+                      spellCheck={false}
+                    />
+                    <button
+                      className="secondary copy-pan-button"
+                      disabled={!isValidPan(panInput)}
+                      onClick={() => void copyPan()}
+                      title="Copy PAN"
+                      type="button"
+                    >
+                      {panCopied ? "Copied" : "Copy PAN"}
+                    </button>
+                  </div>
                   {panError ? <p className="error-text">{panError}</p> : null}
+
+                  <div className="pan-options">
+                    <label className="remember-pan">
+                      <input
+                        checked={rememberPan}
+                        onChange={(event) => updateRememberPan(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Remember PAN on this device
+                    </label>
+                    {restoredPan ? (
+                      <button
+                        className="text-command"
+                        onClick={() => {
+                          lastCheckKey.current = "";
+                          scheduleAutoCheck(panInput, selectedIpoId);
+                          setRestoredPan(false);
+                        }}
+                        type="button"
+                      >
+                        Re-check saved PAN
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
 
                 <div className="actions">
                   <button
                     className="primary"
                     disabled={checking || !ipos.length}
-                    onClick={checkAllotment}
+                    onClick={() => void checkAllotment(panInput, selectedIpoId, true)}
                     type="button"
                   >
-                    {checking ? "Checking..." : "Check Allotment"}
+                    {checking ? "Checking registrar..." : "Check now"}
                   </button>
-                  <span className="small-note">PAN is used only for this check.</span>
+                  <span className="auto-check-note">Auto-checks when PAN is complete</span>
+                </div>
+                <div className="privacy-badge">
+                  <span className="lock-mark" aria-hidden="true" />
+                  <span>
+                    {rememberPan
+                      ? "Saved only in this browser by your choice. Never stored on our server."
+                      : "Sent securely to the official registrar for this check. Never stored on our server."}
+                  </span>
                 </div>
                 {checkError ? <p className="error-text">{checkError}</p> : null}
               </div>
@@ -590,17 +878,35 @@ export default function Home() {
               </div>
 
               <div className="panel-body stack">
-                {currentResult ? (
+                {checking ? (
+                  <div className="checking-state" role="status" aria-live="polite">
+                    <span className="spinner" aria-hidden="true" />
+                    <div>
+                      <strong>Checking registrar database...</strong>
+                      <span>This usually takes only a few seconds.</span>
+                    </div>
+                  </div>
+                ) : currentResult ? (
                   <div className={`single-result ${statusTone(currentResult.status)}`}>
                     <div className="single-result-head">
                       <div>
                         <h3>{currentResult.ipoName}</h3>
-                        <p>{currentResult.registrar}</p>
+                        <p>Data sourced from {currentResult.registrar}</p>
                       </div>
                       <span className={`status-pill ${statusTone(currentResult.status)}`}>
                         {statusLabel(currentResult.status)}
                       </span>
                     </div>
+
+                    {currentResult.status === "allotted" ? (
+                      <div className="allotted-celebration">
+                        <span className="result-check" aria-hidden="true">✓</span>
+                        <div>
+                          <strong>Congratulations!</strong>
+                          <span>Your application received an allotment.</span>
+                        </div>
+                      </div>
+                    ) : null}
 
                     <div className="result-status-line">
                       <strong>{currentResult.liveStatus || statusLabel(currentResult.status)}</strong>
@@ -633,6 +939,12 @@ export default function Home() {
                           <span>Name</span>
                           <strong>{currentResult.applicantName || "-"}</strong>
                         </div>
+                        {currentResult.refundAmount !== undefined ? (
+                          <div>
+                            <span>Refund amount</span>
+                            <strong>{rupee(currentResult.refundAmount)}</strong>
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
 
@@ -710,8 +1022,12 @@ export default function Home() {
                       <p className="small-note">Check complete.</p>
                     )}
 
-                    <button className="secondary" onClick={checkAllotment} type="button">
-                      Check Again
+                    <button
+                      className="secondary result-reset"
+                      onClick={checkAnotherIpo}
+                      type="button"
+                    >
+                      Check Another IPO
                     </button>
                   </div>
                 ) : (
