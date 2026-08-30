@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import closedIpoSeed from "@/data/closed-ipo-backup.json";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
@@ -8,6 +9,17 @@ const gmpFilters = ["open", "upcoming", "closed"] as const;
 const closedPageSizes = [25, 50, 100] as const;
 const RECENT_IPOS_KEY = "ipo-fast-check:recent-ipos";
 const REMEMBERED_PAN_KEY = "ipo-fast-check:remembered-pan";
+const PUBLIC_FEED_CACHE_KEY = "ipo-fast-check:public-feed-v1";
+const PUBLIC_FEED_CACHE_MAX_AGE = 6 * 60 * 60 * 1000;
+
+type PublicFeed = {
+  ipos: Ipo[];
+  gmp: GmpRow[];
+};
+
+type StoredPublicFeed = PublicFeed & {
+  cachedAt: number;
+};
 
 type CaptchaState = {
   token?: string;
@@ -186,12 +198,20 @@ function paginationWindow(currentPage: number, totalPages: number) {
   return Array.from({ length: visibleCount }, (_, index) => start + index);
 }
 
+const bundledAllotmentIpos = recentResultsFirst(
+  (closedIpoSeed as Ipo[]).filter(isLastOrThisMonthResult)
+);
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<"allotment" | "gmp">("allotment");
-  const [ipos, setIpos] = useState<Ipo[]>([]);
+  const [ipos, setIpos] = useState<Ipo[]>(bundledAllotmentIpos);
   const [gmpRows, setGmpRows] = useState<GmpRow[]>([]);
-  const [selectedIpoId, setSelectedIpoId] = useState("");
-  const [ipoSearch, setIpoSearch] = useState("");
+  const [selectedIpoId, setSelectedIpoId] = useState(
+    bundledAllotmentIpos[0]?.id ?? ""
+  );
+  const [ipoSearch, setIpoSearch] = useState(
+    bundledAllotmentIpos[0]?.name ?? ""
+  );
   const [ipoMenuOpen, setIpoMenuOpen] = useState(false);
   const [recentIpoIds, setRecentIpoIds] = useState<string[]>([]);
   const [panInput, setPanInput] = useState("");
@@ -219,6 +239,7 @@ export default function Home() {
   const panInputElement = useRef<HTMLInputElement>(null);
   const autoCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCheckKey = useRef("");
+  const selectedIpoName = useRef(bundledAllotmentIpos[0]?.name ?? "");
 
   useEffect(() => {
     try {
@@ -243,25 +264,64 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    function applyPublicFeed(data: PublicFeed) {
+      if (!Array.isArray(data.ipos) || !Array.isArray(data.gmp)) return false;
+
+      const allotmentChoices = recentResultsFirst(
+        data.ipos.filter(isLastOrThisMonthResult)
+      );
+      const nextChoice =
+        allotmentChoices.find((ipo) => ipo.name === selectedIpoName.current) ??
+        allotmentChoices[0];
+
+      setIpos(data.ipos);
+      setSelectedIpoId(nextChoice?.id ?? "");
+      setIpoSearch(nextChoice?.name ?? "");
+      selectedIpoName.current = nextChoice?.name ?? "";
+      setGmpRows(data.gmp);
+      setLoadError("");
+      return data.ipos.length > 0;
+    }
+
     async function loadData() {
+      let hasUsableFeed = bundledAllotmentIpos.length > 0;
+
+      try {
+        const stored = JSON.parse(
+          localStorage.getItem(PUBLIC_FEED_CACHE_KEY) ?? "null"
+        ) as StoredPublicFeed | null;
+        if (
+          stored &&
+          Number.isFinite(stored.cachedAt) &&
+          Date.now() - stored.cachedAt <= PUBLIC_FEED_CACHE_MAX_AGE
+        ) {
+          hasUsableFeed = applyPublicFeed(stored) || hasUsableFeed;
+        }
+      } catch {
+        // The bundled list still makes the first screen usable without storage.
+      }
+
       try {
         const response = await fetch("/api/feed");
-        const data = (await response.json()) as { ipos: Ipo[]; gmp: GmpRow[] };
+        const data = (await response.json()) as PublicFeed;
 
         if (!response.ok) {
           throw new Error("IPO data is temporarily unavailable.");
         }
 
-        setIpos(data.ipos);
-        const allotmentChoices = recentResultsFirst(
-          data.ipos.filter(isLastOrThisMonthResult)
-        );
-        const firstChoice = allotmentChoices[0];
-        setSelectedIpoId(firstChoice?.id ?? "");
-        setIpoSearch(firstChoice?.name ?? "");
-        setGmpRows(data.gmp);
+        hasUsableFeed = applyPublicFeed(data) || hasUsableFeed;
+        try {
+          localStorage.setItem(
+            PUBLIC_FEED_CACHE_KEY,
+            JSON.stringify({ ...data, cachedAt: Date.now() } satisfies StoredPublicFeed)
+          );
+        } catch {
+          // Public-feed caching is an optional speed enhancement.
+        }
       } catch (error) {
-        setLoadError(error instanceof Error ? error.message : "Could not load IPO data.");
+        if (!hasUsableFeed) {
+          setLoadError(error instanceof Error ? error.message : "Could not load IPO data.");
+        }
       }
     }
 
@@ -354,6 +414,7 @@ export default function Home() {
   }
 
   function selectAllotmentIpo(ipo: Ipo) {
+    selectedIpoName.current = ipo.name;
     setSelectedIpoId(ipo.id);
     setIpoSearch(ipo.name);
     setIpoMenuOpen(false);
