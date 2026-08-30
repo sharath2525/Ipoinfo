@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import { getIpoDataProvider } from "@/lib/providers/ipo-provider";
+import { classifyOfficialResult } from "@/lib/providers/allotment-result";
 import type { AllotmentResult, Ipo } from "@/lib/types";
 
 type RequestBody = {
@@ -49,12 +50,15 @@ async function bigshareCompanyId(ipo: Ipo) {
     .get()
     .filter((option) => option.id && option.id !== "--Select Company--");
 
-  const match = options.find((option) => {
+  const direct = options.find((option) => normalizeKey(option.name) === target);
+  if (direct) return direct.id;
+
+  const fuzzy = options.filter((option) => {
     const candidate = normalizeKey(option.name);
-    return candidate === target || candidate.includes(target) || target.includes(candidate);
+    return candidate.includes(target) || target.includes(candidate);
   });
 
-  return match?.id;
+  return fuzzy.length === 1 ? fuzzy[0].id : undefined;
 }
 
 function resultFromBigsharePayload(
@@ -81,50 +85,113 @@ function resultFromBigsharePayload(
   const record = payload.Records?.[0] ?? payload;
   const appliedQuantity = numberFrom(record.APPLIED);
   const allottedQuantity = numberFrom(record.ALLOTED);
+  const officialStatus = String(payload.Status ?? "").trim().toUpperCase();
 
-  if (payload.Status === "CAPTCHA") {
+  if (officialStatus === "CAPTCHA") {
+    const decision = classifyOfficialResult({
+      signal: "captcha",
+      message: payload.Message ?? "The CAPTCHA was incorrect or expired. Load a fresh one and retry."
+    });
     return {
       ipoId: ipo.id,
       ipoName: ipo.name,
       pan,
-      status: "captcha_required",
+      status: decision.status,
       registrar: ipo.registrar,
       actionUrl: ipo.allotmentUrl,
       actionLabel: "Retry CAPTCHA",
-      liveStatus: "Invalid CAPTCHA",
+      liveStatus: decision.liveStatus,
       checkedAt,
-      error: payload.Message ?? "Invalid CAPTCHA."
+      error: decision.explanation
     };
   }
 
-  if (payload.Status === "NOTFOUND" || (!appliedQuantity && !allottedQuantity)) {
+  if (officialStatus === "RATELIMIT" || officialStatus === "WARMING") {
+    const decision = classifyOfficialResult({
+      signal: "pending",
+      message:
+        payload.Message ??
+        (officialStatus === "RATELIMIT"
+          ? "Bigshare is receiving too many checks. Please wait briefly and retry."
+          : "Bigshare is preparing the result service. Please retry shortly.")
+    });
     return {
       ipoId: ipo.id,
       ipoName: ipo.name,
       pan,
-      status: "not_applied",
+      status: decision.status,
       registrar: ipo.registrar,
-      liveStatus: "Not applied",
+      actionUrl: ipo.allotmentUrl,
+      actionLabel: "Open Bigshare",
+      liveStatus: decision.liveStatus,
       checkedAt,
-      error: "Bigshare did not find an application for this PAN."
+      error: decision.explanation
     };
   }
+
+  if (officialStatus === "NOTFOUND") {
+    const decision = classifyOfficialResult({
+      signal: "not_found",
+      message: "Bigshare explicitly returned no application record for this PAN and IPO."
+    });
+    return {
+      ipoId: ipo.id,
+      ipoName: ipo.name,
+      pan,
+      status: decision.status,
+      registrar: ipo.registrar,
+      actionUrl: ipo.allotmentUrl,
+      actionLabel: "Verify on Bigshare",
+      liveStatus: decision.liveStatus,
+      checkedAt,
+      error: decision.explanation
+    };
+  }
+
+  if (officialStatus !== "OK") {
+    const decision = classifyOfficialResult({
+      signal: "unavailable",
+      message:
+        payload.Message ??
+        "Bigshare returned an unexpected response. Load a fresh CAPTCHA and retry."
+    });
+    return {
+      ipoId: ipo.id,
+      ipoName: ipo.name,
+      pan,
+      status: decision.status,
+      registrar: ipo.registrar,
+      actionUrl: ipo.allotmentUrl,
+      actionLabel: "Open Bigshare",
+      liveStatus: decision.liveStatus,
+      checkedAt,
+      error: decision.explanation
+    };
+  }
+
+  const applicantName = record.Name || undefined;
+  const applicationNo = record.APPLICATION_NO || undefined;
+  const decision = classifyOfficialResult({
+    signal: "record",
+    appliedQuantity,
+    allottedQuantity,
+    applicantName,
+    applicationNo
+  });
 
   return {
     ipoId: ipo.id,
     ipoName: ipo.name,
     pan,
-    status: allottedQuantity > 0 ? "allotted" : "not_allotted",
+    status: decision.status,
     appliedQuantity,
     allottedQuantity,
-    applicantName: record.Name,
-    applicationNo: record.APPLICATION_NO,
+    applicantName,
+    applicationNo,
     registrar: ipo.registrar,
     checkedAt,
-    liveStatus:
-      allottedQuantity > 0
-        ? `Allotted ${allottedQuantity} shares`
-        : "Applied, not allotted"
+    liveStatus: decision.liveStatus,
+    error: decision.status === "unavailable" ? decision.explanation : undefined
   };
 }
 
@@ -157,13 +224,10 @@ export async function POST(request: Request) {
     ipo = (await getIpoDataProvider().listRecentIpos()).find(
       (item) => item.id === body.ipoId
     );
-  } catch (error) {
+  } catch {
     return Response.json(
       {
-        error:
-          error instanceof Error
-            ? `Could not load live IPO data: ${error.message}`
-            : "Could not load live IPO data."
+        error: "Could not load the recent IPO list. Please retry shortly."
       },
       { status: 502 }
     );
@@ -184,13 +248,10 @@ export async function POST(request: Request) {
 
   try {
     companyId = await bigshareCompanyId(ipo);
-  } catch (error) {
+  } catch {
     return Response.json(
       {
-        error:
-          error instanceof Error
-            ? `Could not load Bigshare issue list: ${error.message}`
-            : "Could not load Bigshare issue list."
+        error: "Could not load Bigshare's current IPO list. Please retry shortly."
       },
       { status: 502 }
     );
@@ -225,13 +286,10 @@ export async function POST(request: Request) {
       }),
       cache: "no-store"
     });
-  } catch (error) {
+  } catch {
     return Response.json(
       {
-        error:
-          error instanceof Error
-            ? `Bigshare request failed: ${error.message}`
-            : "Bigshare request failed."
+        error: "Bigshare could not complete the request. Please retry with a fresh CAPTCHA."
       },
       { status: 502 }
     );
@@ -239,7 +297,7 @@ export async function POST(request: Request) {
 
   if (!response.ok) {
     return Response.json(
-      { error: `Bigshare returned ${response.status}.` },
+      { error: "Bigshare is temporarily unavailable. Please retry shortly." },
       { status: 502 }
     );
   }

@@ -40,7 +40,7 @@ export async function checkAllotments(
     tasks.map(({ ipo, provider }, index) => async () => {
       try {
         return await provider.check(ipo, panByTask[index]);
-      } catch (error) {
+      } catch {
         return {
           ipoId: ipo.id,
           ipoName: ipo.name,
@@ -48,7 +48,9 @@ export async function checkAllotments(
           status: "error",
           registrar: ipo.registrar,
           checkedAt,
-          error: error instanceof Error ? error.message : "Unknown provider error"
+          liveStatus: "Official check failed",
+          error:
+            "The registrar could not complete this check. Please retry shortly or use the official status link."
         };
       }
     }),

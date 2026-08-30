@@ -18,19 +18,16 @@ export async function GET(request: Request) {
 
     if (!response.ok) {
       return Response.json(
-        { error: `Bigshare CAPTCHA returned ${response.status}.` },
+        { error: "Bigshare could not provide a CAPTCHA. Please retry shortly." },
         { status: 502 }
       );
     }
 
     return Response.json(await response.json());
-  } catch (error) {
+  } catch {
     return Response.json(
       {
-        error:
-          error instanceof Error
-            ? `Could not load Bigshare CAPTCHA: ${error.message}`
-            : "Could not load Bigshare CAPTCHA."
+        error: "Could not load the Bigshare CAPTCHA. Please retry shortly."
       },
       { status: 502 }
     );

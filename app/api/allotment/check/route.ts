@@ -52,13 +52,10 @@ export async function POST(request: Request) {
     ipos = (await getIpoDataProvider().listRecentIpos()).filter((ipo) =>
       requested.has(ipo.id)
     );
-  } catch (error) {
+  } catch {
     return Response.json(
       {
-        error:
-          error instanceof Error
-            ? `Could not load live IPO data: ${error.message}`
-            : "Could not load live IPO data."
+        error: "Could not load the recent IPO list. Please retry shortly."
       },
       { status: 502 }
     );
@@ -71,13 +68,10 @@ export async function POST(request: Request) {
   try {
     const response = await checkAllotments(pans, ipos);
     return Response.json(response);
-  } catch (error) {
+  } catch {
     return Response.json(
       {
-        error:
-          error instanceof Error
-            ? `Allotment check failed: ${error.message}`
-            : "Allotment check failed."
+        error: "The official allotment check could not be completed. Please retry shortly."
       },
       { status: 502 }
     );

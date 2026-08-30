@@ -1,5 +1,9 @@
 import { createCipheriv } from "crypto";
 import * as cheerio from "cheerio";
+import {
+  classifyOfficialResult,
+  containsExplicitNoRecord
+} from "@/lib/providers/allotment-result";
 import type { AllotmentResult, Ipo } from "@/lib/types";
 
 export interface AllotmentProvider {
@@ -13,7 +17,7 @@ type KfinIssue = {
 };
 
 const MUFG_BASE_URL = "https://in.mpms.mufg.com/Initial_Offer/";
-const KFIN_BUNDLE_URL = "https://ipostatus.kfintech.com/static/js/main.59c23bd9.js";
+const KFIN_BASE_URL = "https://ipostatus.kfintech.com/";
 const KFIN_QUERY_URL =
   "https://0uz601ms56.execute-api.ap-south-1.amazonaws.com/prod/api/query?type=";
 
@@ -90,12 +94,12 @@ function findIssueId<T extends { name: string }>(
 ) {
   const target = normalizeKey(ipoName);
   const direct = issues.find((issue) => normalizeKey(issue.name) === target);
-  const fuzzy = issues.find((issue) => {
+  const fuzzy = issues.filter((issue) => {
     const candidate = normalizeKey(issue.name);
     return candidate.includes(target) || target.includes(candidate);
   });
 
-  const match = direct ?? fuzzy;
+  const match = direct ?? (fuzzy.length === 1 ? fuzzy[0] : undefined);
   return match ? getId(match) : undefined;
 }
 
@@ -106,15 +110,22 @@ function resultFromRegistrarRows(
   checkedAt: string
 ): AllotmentResult {
   if (!rows.length) {
+    const decision = classifyOfficialResult({
+      signal: "unavailable",
+      message:
+        "MUFG Intime returned no usable details. This does not confirm that you did not apply; please retry or use the official form."
+    });
     return {
       ipoId: ipo.id,
       ipoName: ipo.name,
       pan,
-      status: "not_applied",
+      status: decision.status,
       registrar: ipo.registrar,
       checkedAt,
-      liveStatus: "Not applied",
-      error: "The registrar did not find an application for this PAN."
+      liveStatus: decision.liveStatus,
+      error: decision.explanation,
+      actionUrl: ipo.allotmentUrl,
+      actionLabel: "Check on MUFG Intime"
     };
   }
 
@@ -123,25 +134,31 @@ function resultFromRegistrarRows(
     first.allot ?? first.alloted ?? first.allotted ?? first.securitiesallotted
   );
   const appliedQuantity = numberFrom(first.shares ?? first.applied ?? first.appliedshares);
-  const status = allottedQuantity > 0 ? "allotted" : "not_allotted";
+  const applicantName = first.name1 ?? first.name;
+  const applicationNo = first.application_no ?? first.applno ?? first.appl_no;
+  const decision = classifyOfficialResult({
+    signal: "record",
+    appliedQuantity,
+    allottedQuantity,
+    applicantName,
+    applicationNo
+  });
 
   return {
     ipoId: ipo.id,
     ipoName: ipo.name,
     pan,
-    status,
+    status: decision.status,
     allottedQuantity,
     appliedQuantity,
-    applicantName: first.name1 ?? first.name,
-    applicationNo: first.application_no ?? first.applno ?? first.appl_no,
+    applicantName,
+    applicationNo,
     amountAdjusted: numberFrom(first.amtadj),
     refundAmount: numberFrom(first.rfndamt),
     registrar: ipo.registrar,
     checkedAt,
-    liveStatus:
-      status === "allotted"
-        ? `Allotted ${allottedQuantity} shares`
-        : "Applied, not allotted"
+    liveStatus: decision.liveStatus,
+    error: decision.status === "unavailable" ? decision.explanation : undefined
   };
 }
 
@@ -180,10 +197,26 @@ async function checkMufg(ipo: Ipo, pan: string, checkedAt: string) {
 }
 
 async function loadKfinIssues() {
-  const response = await fetch(KFIN_BUNDLE_URL, { cache: "no-store" });
+  const pageResponse = await fetch(KFIN_BASE_URL, { cache: "no-store" });
+
+  if (!pageResponse.ok) {
+    throw new Error(`KFinTech issue page returned ${pageResponse.status}`);
+  }
+
+  const $ = cheerio.load(await pageResponse.text());
+  const bundlePath = $("script[src]")
+    .map((_, element) => $(element).attr("src"))
+    .get()
+    .find((src) => /\/static\/js\/main\.[^/]+\.js(?:\?|$)/i.test(src ?? ""));
+
+  if (!bundlePath) {
+    throw new Error("KFinTech issue bundle was not found");
+  }
+
+  const response = await fetch(new URL(bundlePath, KFIN_BASE_URL), { cache: "no-store" });
 
   if (!response.ok) {
-    throw new Error(`KFinTech bundle returned ${response.status}`);
+    throw new Error(`KFinTech app returned ${response.status}`);
   }
 
   const bundle = await response.text();
@@ -201,24 +234,34 @@ function resultFromKfinPayload(
   payload: unknown,
   checkedAt: string
 ): AllotmentResult {
+  const body = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
   const data: Array<Record<string, unknown>> =
-    payload &&
-    typeof payload === "object" &&
-    "data" in payload &&
-    Array.isArray((payload as { data?: unknown }).data)
-      ? (payload as { data: Array<Record<string, unknown>> }).data
+    Array.isArray(body.data)
+      ? (body.data as Array<Record<string, unknown>>)
       : [];
+  const message = [body.message, body.Message, body.error, body.Error].find(
+    (value) => typeof value === "string"
+  ) as string | undefined;
 
   if (!data.length) {
+    const explicitNoRecord = containsExplicitNoRecord(message);
+    const decision = classifyOfficialResult({
+      signal: explicitNoRecord ? "not_found" : "unavailable",
+      message: explicitNoRecord
+        ? "KFinTech explicitly returned no application record for this PAN and IPO."
+        : "KFinTech returned no usable application details. This does not confirm that you did not apply."
+    });
     return {
       ipoId: ipo.id,
       ipoName: ipo.name,
       pan,
-      status: "not_applied",
+      status: decision.status,
       registrar: ipo.registrar,
       checkedAt,
-      liveStatus: "Not applied",
-      error: "The registrar did not find an application for this PAN."
+      liveStatus: decision.liveStatus,
+      error: decision.explanation,
+      actionUrl: ipo.allotmentUrl ?? KFIN_BASE_URL,
+      actionLabel: "Check on KFinTech"
     };
   }
 
@@ -229,22 +272,30 @@ function resultFromKfinPayload(
   const appliedQuantity = numberFrom(
     String(first.applied ?? first.shares ?? first.SHARES ?? "")
   );
+  const applicantName = String(first.name ?? first.NAME1 ?? first.Name ?? "") || undefined;
+  const applicationNo =
+    String(first.application_no ?? first.ApplicationNo ?? "") || undefined;
+  const decision = classifyOfficialResult({
+    signal: "record",
+    appliedQuantity,
+    allottedQuantity,
+    applicantName,
+    applicationNo
+  });
 
   return {
     ipoId: ipo.id,
     ipoName: ipo.name,
     pan,
-    status: allottedQuantity > 0 ? "allotted" : "not_allotted",
+    status: decision.status,
     allottedQuantity,
     appliedQuantity,
-    applicantName: String(first.name ?? first.NAME1 ?? first.Name ?? ""),
-    applicationNo: String(first.application_no ?? first.ApplicationNo ?? ""),
+    applicantName,
+    applicationNo,
     registrar: ipo.registrar,
     checkedAt,
-    liveStatus:
-      allottedQuantity > 0
-        ? `Allotted ${allottedQuantity} shares`
-        : "Not allotted / no allotment record"
+    liveStatus: decision.liveStatus,
+    error: decision.status === "unavailable" ? decision.explanation : undefined
   };
 }
 
@@ -276,7 +327,23 @@ async function checkKfin(ipo: Ipo, pan: string, checkedAt: string) {
   });
 
   if (response.status === 404) {
-    return resultFromKfinPayload(ipo, pan, { data: [] }, checkedAt);
+    const decision = classifyOfficialResult({
+      signal: "unavailable",
+      message:
+        "KFinTech did not return a result for this request. This does not confirm that you did not apply."
+    });
+    return {
+      ipoId: ipo.id,
+      ipoName: ipo.name,
+      pan,
+      status: decision.status,
+      registrar: ipo.registrar,
+      checkedAt,
+      liveStatus: decision.liveStatus,
+      error: decision.explanation,
+      actionUrl: ipo.allotmentUrl ?? KFIN_BASE_URL,
+      actionLabel: "Check on KFinTech"
+    };
   }
 
   if (!response.ok) {
@@ -297,7 +364,7 @@ function captchaRequired(ipo: Ipo, pan: string, checkedAt: string): AllotmentRes
     actionLabel: "Open official form",
     liveStatus: "CAPTCHA required",
     checkedAt,
-    error: "This registrar requires CAPTCHA, so automatic same-page checking is blocked."
+    error: "Complete the official registrar CAPTCHA below to continue."
   };
 }
 

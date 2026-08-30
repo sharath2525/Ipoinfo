@@ -70,7 +70,8 @@ function statusLabel(value: string) {
   if (value === "expected_soon") return "Expected Soon";
   if (value === "captcha_required") return "CAPTCHA Required";
   if (value === "not_applied") return "Not Applied";
-  if (value === "unavailable") return "Official Check";
+  if (value === "unavailable") return "Could Not Verify";
+  if (value === "error") return "Check Failed";
 
   return value
     .split("_")
@@ -88,9 +89,28 @@ function statusTone(value: string) {
     return "good";
   }
 
-  if (value === "not_allotted" || value === "error") return "bad";
-  if (value === "not_applied" || value === "unavailable") return "neutral";
+  if (value === "not_allotted") return "bad";
+  if (
+    value === "not_applied" ||
+    value === "unavailable" ||
+    value === "pending" ||
+    value === "expected_soon" ||
+    value === "captcha_required"
+  ) {
+    return "warn";
+  }
   return "warn";
+}
+
+function hasResultFacts(result: AllotmentResult) {
+  return Boolean(
+    result.status === "allotted" ||
+      result.status === "not_allotted" ||
+      result.appliedQuantity !== undefined ||
+      result.allottedQuantity !== undefined ||
+      result.applicationNo ||
+      result.applicantName
+  );
 }
 
 function parseDate(value?: string) {
@@ -589,24 +609,32 @@ export default function Home() {
                       </span>
                     </div>
 
-                    <div className="result-facts">
-                      <div>
-                        <span>Applied</span>
-                        <strong>{currentResult.appliedQuantity ?? "-"}</strong>
+                    {currentResult.error ? (
+                      <p className={`result-guidance ${statusTone(currentResult.status)}`}>
+                        {currentResult.error}
+                      </p>
+                    ) : null}
+
+                    {hasResultFacts(currentResult) ? (
+                      <div className="result-facts">
+                        <div>
+                          <span>Applied</span>
+                          <strong>{currentResult.appliedQuantity ?? "-"}</strong>
+                        </div>
+                        <div>
+                          <span>Allotted</span>
+                          <strong>{currentResult.allottedQuantity ?? "-"}</strong>
+                        </div>
+                        <div>
+                          <span>Application</span>
+                          <strong>{currentResult.applicationNo || "-"}</strong>
+                        </div>
+                        <div>
+                          <span>Name</span>
+                          <strong>{currentResult.applicantName || "-"}</strong>
+                        </div>
                       </div>
-                      <div>
-                        <span>Allotted</span>
-                        <strong>{currentResult.allottedQuantity ?? "-"}</strong>
-                      </div>
-                      <div>
-                        <span>Application</span>
-                        <strong>{currentResult.applicationNo || "-"}</strong>
-                      </div>
-                      <div>
-                        <span>Name</span>
-                        <strong>{currentResult.applicantName || "-"}</strong>
-                      </div>
-                    </div>
+                    ) : null}
 
                     {currentResult.status === "captcha_required" &&
                     currentResult.registrar.toLowerCase().includes("bigshare") ? (
@@ -678,8 +706,8 @@ export default function Home() {
                       >
                         {currentResult.actionLabel || `Open ${currentResult.registrar}`}
                       </a>
-                    ) : (
-                      <p className="small-note">{currentResult.error ?? "Check complete."}</p>
+                    ) : currentResult.error ? null : (
+                      <p className="small-note">Check complete.</p>
                     )}
 
                     <button className="secondary" onClick={checkAllotment} type="button">
