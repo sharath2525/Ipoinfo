@@ -7,7 +7,6 @@ import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/typ
 
 const gmpFilters = ["open", "upcoming", "closed"] as const;
 const closedPageSizes = [25, 50, 100] as const;
-const RECENT_IPOS_KEY = "ipo-fast-check:recent-ipos";
 const REMEMBERED_PAN_KEY = "ipo-fast-check:remembered-pan";
 const PUBLIC_FEED_CACHE_KEY = "ipo-fast-check:public-feed-v1";
 const PUBLIC_FEED_CACHE_MAX_AGE = 6 * 60 * 60 * 1000;
@@ -209,11 +208,6 @@ export default function Home() {
   const [selectedIpoId, setSelectedIpoId] = useState(
     bundledAllotmentIpos[0]?.id ?? ""
   );
-  const [ipoSearch, setIpoSearch] = useState(
-    bundledAllotmentIpos[0]?.name ?? ""
-  );
-  const [ipoMenuOpen, setIpoMenuOpen] = useState(false);
-  const [recentIpoIds, setRecentIpoIds] = useState<string[]>([]);
   const [panInput, setPanInput] = useState("");
   const [panError, setPanError] = useState("");
   const [rememberPan, setRememberPan] = useState(false);
@@ -235,7 +229,7 @@ export default function Home() {
   const [closedError, setClosedError] = useState("");
   const closedRequestId = useRef(0);
   const gmpResultsTop = useRef<HTMLDivElement>(null);
-  const ipoSearchInput = useRef<HTMLInputElement>(null);
+  const ipoSelectElement = useRef<HTMLSelectElement>(null);
   const panInputElement = useRef<HTMLInputElement>(null);
   const autoCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCheckKey = useRef("");
@@ -243,11 +237,6 @@ export default function Home() {
 
   useEffect(() => {
     try {
-      const savedRecent = JSON.parse(localStorage.getItem(RECENT_IPOS_KEY) ?? "[]");
-      if (Array.isArray(savedRecent)) {
-        setRecentIpoIds(savedRecent.filter((value): value is string => typeof value === "string"));
-      }
-
       const savedPan = normalizePan(localStorage.getItem(REMEMBERED_PAN_KEY) ?? "");
       if (isValidPan(savedPan)) {
         setPanInput(savedPan);
@@ -276,7 +265,6 @@ export default function Home() {
 
       setIpos(data.ipos);
       setSelectedIpoId(nextChoice?.id ?? "");
-      setIpoSearch(nextChoice?.name ?? "");
       selectedIpoName.current = nextChoice?.name ?? "";
       setGmpRows(data.gmp);
       setLoadError("");
@@ -351,23 +339,6 @@ export default function Home() {
     () => recentResultsFirst(ipos.filter(isLastOrThisMonthResult)),
     [ipos]
   );
-  const recentlyCheckedIpos = useMemo(
-    () =>
-      recentIpoIds
-        .map((id) => allotmentIpos.find((ipo) => ipo.id === id))
-        .filter((ipo): ipo is Ipo => Boolean(ipo))
-        .slice(0, 3),
-    [allotmentIpos, recentIpoIds]
-  );
-  const matchingAllotmentIpos = useMemo(() => {
-    const query = ipoSearch.trim().toLowerCase();
-    if (!query || selectedIpo?.name.toLowerCase() === query) return allotmentIpos;
-    return allotmentIpos.filter((ipo) =>
-      `${ipo.name} ${ipo.registrar}`.toLowerCase().includes(query)
-    );
-  }, [allotmentIpos, ipoSearch, selectedIpo]);
-  const showIpoLanding =
-    !ipoSearch.trim() || ipoSearch.trim().toLowerCase() === selectedIpo?.name.toLowerCase();
   const currentResult = results?.results[0];
   const currentCaptcha = currentResult ? captchas[resultKey(currentResult)] : undefined;
   const closedTotalPages = Math.max(1, Math.ceil(closedTotal / closedPageSize));
@@ -403,21 +374,9 @@ export default function Home() {
     });
   }
 
-  function rememberCheckedIpo(ipoId: string) {
-    const nextIds = [ipoId, ...recentIpoIds.filter((id) => id !== ipoId)].slice(0, 3);
-    setRecentIpoIds(nextIds);
-    try {
-      localStorage.setItem(RECENT_IPOS_KEY, JSON.stringify(nextIds));
-    } catch {
-      // Recent IPO history is an optional convenience only.
-    }
-  }
-
   function selectAllotmentIpo(ipo: Ipo) {
     selectedIpoName.current = ipo.name;
     setSelectedIpoId(ipo.id);
-    setIpoSearch(ipo.name);
-    setIpoMenuOpen(false);
     setResults(null);
     setCaptchas({});
     setCheckError("");
@@ -524,7 +483,6 @@ export default function Home() {
       }
 
       setResults(data as BatchCheckResponse);
-      rememberCheckedIpo(ipoId);
       if (rememberPan) {
         try {
           localStorage.setItem(REMEMBERED_PAN_KEY, pan);
@@ -585,9 +543,7 @@ export default function Home() {
     setCaptchas({});
     setCheckError("");
     lastCheckKey.current = "";
-    setIpoMenuOpen(true);
-    setIpoSearch("");
-    requestAnimationFrame(() => ipoSearchInput.current?.focus());
+    requestAnimationFrame(() => ipoSelectElement.current?.focus());
   }
 
   async function loadCaptcha(result: AllotmentResult) {
@@ -729,92 +685,27 @@ export default function Home() {
                   {loadError ? <p className="error-text">{loadError}</p> : null}
 
                   <div className="selector-block">
-                    <div className="ipo-combobox">
-                      <input
-                        ref={ipoSearchInput}
-                        className="ipo-search-input"
-                        value={ipoSearch}
-                        onChange={(event) => {
-                          setIpoSearch(event.target.value);
-                          setIpoMenuOpen(true);
-                          if (event.target.value !== selectedIpo?.name) {
-                            setSelectedIpoId("");
-                            setResults(null);
-                          }
-                        }}
-                        onFocus={() => setIpoMenuOpen(true)}
-                        onBlur={() => setTimeout(() => setIpoMenuOpen(false), 160)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") setIpoMenuOpen(false);
-                          if (event.key === "Enter" && matchingAllotmentIpos[0]) {
-                            event.preventDefault();
-                            selectAllotmentIpo(matchingAllotmentIpos[0]);
-                          }
-                        }}
-                        placeholder="Search recently closed IPO"
-                        role="combobox"
-                        aria-label="Search and select IPO"
-                        aria-controls="ipo-suggestions"
-                        aria-expanded={ipoMenuOpen}
-                        aria-autocomplete="list"
-                        autoComplete="off"
-                      />
-
-                      {ipoMenuOpen ? (
-                        <div className="ipo-suggestions" id="ipo-suggestions" role="listbox">
-                          {showIpoLanding && recentlyCheckedIpos.length ? (
-                            <div className="ipo-suggestion-group">
-                              <span className="suggestion-heading">Recently checked</span>
-                              {recentlyCheckedIpos.map((ipo) => (
-                                <button
-                                  className="ipo-suggestion recent"
-                                  key={`recent-${ipo.id}`}
-                                  onMouseDown={(event) => event.preventDefault()}
-                                  onClick={() => selectAllotmentIpo(ipo)}
-                                  role="option"
-                                  aria-selected={ipo.id === selectedIpoId}
-                                  type="button"
-                                >
-                                  <strong>{ipo.name}</strong>
-                                  <span>Closed {dateLabel(ipo.closeDate)}</span>
-                                </button>
-                              ))}
-                            </div>
-                          ) : null}
-
-                          <div className="ipo-suggestion-group">
-                            <span className="suggestion-heading">
-                              {showIpoLanding ? "Recently closed" : "Matching IPOs"}
-                            </span>
-                            {matchingAllotmentIpos
-                              .filter(
-                                (ipo) =>
-                                  !showIpoLanding ||
-                                  !recentlyCheckedIpos.some((recent) => recent.id === ipo.id)
-                              )
-                              .map((ipo) => (
-                                <button
-                                  className="ipo-suggestion"
-                                  key={ipo.id}
-                                  onMouseDown={(event) => event.preventDefault()}
-                                  onClick={() => selectAllotmentIpo(ipo)}
-                                  role="option"
-                                  aria-selected={ipo.id === selectedIpoId}
-                                  type="button"
-                                >
-                                  <strong>{ipo.name}</strong>
-                                  <span>
-                                    Closed {dateLabel(ipo.closeDate)} • {ipo.registrar}
-                                  </span>
-                                </button>
-                              ))}
-                            {!matchingAllotmentIpos.length ? (
-                              <p className="no-ipo-match">No recent IPO matches this search.</p>
-                            ) : null}
-                          </div>
-                        </div>
+                    <select
+                      ref={ipoSelectElement}
+                      className="select-input ipo-select"
+                      value={selectedIpoId}
+                      onChange={(event) => {
+                        const ipo = allotmentIpos.find(
+                          (item) => item.id === event.target.value
+                        );
+                        if (ipo) selectAllotmentIpo(ipo);
+                      }}
+                      aria-label="Select a recently closed IPO"
+                    >
+                      {!allotmentIpos.length ? (
+                        <option value="">No recent completed IPOs available</option>
                       ) : null}
-                    </div>
+                      {allotmentIpos.map((ipo) => (
+                        <option key={ipo.id} value={ipo.id}>
+                          {ipo.name} - Closed {dateLabel(ipo.closeDate)}
+                        </option>
+                      ))}
+                    </select>
 
                     {selectedIpo ? (
                       <div className="selected-box">

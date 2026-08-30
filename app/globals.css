@@ -50,7 +50,7 @@ button:disabled {
 
 .page {
   min-height: 100vh;
-  padding: 18px;
+  padding: calc(18px + env(safe-area-inset-top)) 18px 18px;
   background:
     linear-gradient(180deg, #191713 0, #191713 126px, transparent 126px),
     var(--bg);
@@ -210,103 +210,10 @@ h3 {
   outline: 3px solid rgba(138, 90, 24, 0.15);
 }
 
-.ipo-combobox {
-  position: relative;
-}
-
-.ipo-search-input {
-  width: 100%;
-  min-height: 48px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0 42px 0 12px;
-  color: var(--text);
-  background: #fff;
-  font-weight: 800;
-}
-
-.ipo-search-input:focus {
-  border-color: var(--brand);
-  outline: 3px solid rgba(138, 90, 24, 0.15);
-}
-
-.ipo-combobox::after {
-  position: absolute;
-  top: 18px;
-  right: 16px;
-  width: 8px;
-  height: 8px;
-  border-right: 2px solid var(--muted);
-  border-bottom: 2px solid var(--muted);
-  content: "";
-  pointer-events: none;
-  transform: rotate(45deg);
-}
-
-.ipo-suggestions {
-  position: absolute;
-  z-index: 30;
-  top: calc(100% + 6px);
-  right: 0;
-  left: 0;
-  max-height: min(360px, 52vh);
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 18px 44px rgba(25, 23, 19, 0.18);
-}
-
-.ipo-suggestion-group + .ipo-suggestion-group {
-  border-top: 1px solid var(--line);
-}
-
-.suggestion-heading {
-  display: block;
-  position: sticky;
-  z-index: 1;
-  top: 0;
-  padding: 9px 12px 7px;
-  color: var(--muted);
-  background: var(--panel-soft);
-  font-size: 0.72rem;
-  font-weight: 850;
-  text-transform: uppercase;
-}
-
-.ipo-suggestion {
-  display: grid;
-  width: 100%;
-  min-height: 58px;
-  gap: 3px;
-  border: 0;
-  border-top: 1px solid rgba(224, 214, 200, 0.68);
-  padding: 10px 12px;
-  text-align: left;
-  color: var(--text);
-  background: #fff;
-}
-
-.ipo-suggestion:hover,
-.ipo-suggestion[aria-selected="true"] {
-  background: var(--warning-soft);
-}
-
-.ipo-suggestion.recent {
-  border-left: 3px solid var(--brand);
-}
-
-.ipo-suggestion span {
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.no-ipo-match {
-  margin: 0;
-  padding: 18px 12px;
-  color: var(--muted);
-  text-align: center;
-  font-size: 0.86rem;
+.ipo-select {
+  min-width: 0;
+  min-height: 50px;
+  font-size: 1rem;
 }
 
 .text-input:focus {
@@ -1237,7 +1144,7 @@ h3 {
 
 @media (max-width: 520px) {
   .page {
-    padding: 12px;
+    padding: calc(12px + env(safe-area-inset-top)) 12px 12px;
   }
 
   .panel-header,
@@ -1249,15 +1156,6 @@ h3 {
   .actions,
   .gmp-tools {
     grid-template-columns: 1fr;
-  }
-
-  .ipo-suggestions {
-    position: fixed;
-    top: auto;
-    right: 12px;
-    bottom: 12px;
-    left: 12px;
-    max-height: min(420px, 52dvh);
   }
 
   .pan-control {
