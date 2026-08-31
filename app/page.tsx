@@ -6,6 +6,13 @@ import { isValidPan, normalizePan } from "@/lib/pan";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
 const gmpFilters = ["open", "upcoming", "closed"] as const;
+const gmpViewModes = [
+  "mainboard_first",
+  "sme_first",
+  "mainboard_only",
+  "sme_only",
+  "date_priority"
+] as const;
 const closedPageSizes = [25, 50, 100] as const;
 const REMEMBERED_PAN_KEY = "ipo-fast-check:remembered-pan";
 const PUBLIC_FEED_CACHE_KEY = "ipo-fast-check:public-feed-v1";
@@ -155,6 +162,43 @@ function gmpGroup(row: GmpRow): "open" | "upcoming" | "closed" {
   return "closed";
 }
 
+function gmpViewModeLabel(
+  mode: (typeof gmpViewModes)[number],
+  filter: "open" | "upcoming" | "closed"
+) {
+  if (mode === "mainboard_first") return "Mainboard first";
+  if (mode === "sme_first") return "SME first";
+  if (mode === "mainboard_only") return "Mainboard only";
+  if (mode === "sme_only") return "SME only";
+  return filter === "upcoming" ? "Opening soon" : "Closing soon";
+}
+
+function sortCurrentGmpRows(
+  rows: GmpRow[],
+  filter: "open" | "upcoming",
+  mode: (typeof gmpViewModes)[number]
+) {
+  const relevantTime = (row: GmpRow) =>
+    dateTime(filter === "upcoming" ? row.openDate : row.closeDate);
+  const byRelevantDate = (first: GmpRow, second: GmpRow) =>
+    relevantTime(first) - relevantTime(second) || first.name.localeCompare(second.name);
+
+  if (mode === "mainboard_only") {
+    return rows.filter((row) => row.marketType !== "SME").sort(byRelevantDate);
+  }
+  if (mode === "sme_only") {
+    return rows.filter((row) => row.marketType === "SME").sort(byRelevantDate);
+  }
+  if (mode === "date_priority") return [...rows].sort(byRelevantDate);
+
+  const preferredMarket = mode === "sme_first" ? "SME" : "Mainboard";
+  return [...rows].sort((first, second) => {
+    const firstMarket = (first.marketType ?? "Mainboard") === preferredMarket ? 0 : 1;
+    const secondMarket = (second.marketType ?? "Mainboard") === preferredMarket ? 0 : 1;
+    return firstMarket - secondMarket || byRelevantDate(first, second);
+  });
+}
+
 function isCompletedIpo(ipo: Ipo) {
   const closeDate = parseDate(ipo.closeDate);
   return (
@@ -220,6 +264,7 @@ export default function Home() {
   const [captchas, setCaptchas] = useState<Record<string, CaptchaState>>({});
   const [gmpSearch, setGmpSearch] = useState("");
   const [gmpFilter, setGmpFilter] = useState<(typeof gmpFilters)[number]>("open");
+  const [gmpViewModeIndex, setGmpViewModeIndex] = useState(0);
   const [closedGmpRows, setClosedGmpRows] = useState<GmpRow[]>([]);
   const [closedTotal, setClosedTotal] = useState(0);
   const [closedPage, setClosedPage] = useState(1);
@@ -324,15 +369,21 @@ export default function Home() {
 
   const filteredGmp = useMemo(() => {
     const sourceRows = gmpFilter === "closed" ? closedGmpRows : gmpRows;
-
-    return sortGmpRows(sourceRows.filter((row) => {
+    const matchingRows = sourceRows.filter((row) => {
       const matchesFilter = gmpGroup(row) === gmpFilter;
       const matchesSearch = row.name
         .toLowerCase()
         .includes(gmpSearch.trim().toLowerCase());
       return matchesFilter && matchesSearch;
-    }));
-  }, [closedGmpRows, gmpFilter, gmpRows, gmpSearch]);
+    });
+
+    if (gmpFilter === "closed") return sortGmpRows(matchingRows);
+    return sortCurrentGmpRows(
+      matchingRows,
+      gmpFilter,
+      gmpViewModes[gmpViewModeIndex]
+    );
+  }, [closedGmpRows, gmpFilter, gmpRows, gmpSearch, gmpViewModeIndex]);
 
   const selectedIpo = ipos.find((ipo) => ipo.id === selectedIpoId);
   const allotmentIpos = useMemo(
@@ -1033,6 +1084,43 @@ export default function Home() {
                 </div>
               </div>
 
+              {gmpFilter !== "closed" ? (
+                <div className="gmp-view-stepper" aria-label="IPO market and date order">
+                  <button
+                    className="gmp-view-arrow"
+                    disabled={gmpViewModeIndex === 0}
+                    onClick={() =>
+                      setGmpViewModeIndex((index) => Math.max(0, index - 1))
+                    }
+                    title="Previous order"
+                    type="button"
+                    aria-label="Previous IPO order"
+                  >
+                    &#8592;
+                  </button>
+                  <div className="gmp-view-label" aria-live="polite">
+                    <span>View</span>
+                    <strong>
+                      {gmpViewModeLabel(gmpViewModes[gmpViewModeIndex], gmpFilter)}
+                    </strong>
+                  </div>
+                  <button
+                    className="gmp-view-arrow"
+                    disabled={gmpViewModeIndex === gmpViewModes.length - 1}
+                    onClick={() =>
+                      setGmpViewModeIndex((index) =>
+                        Math.min(gmpViewModes.length - 1, index + 1)
+                      )
+                    }
+                    title="Next order"
+                    type="button"
+                    aria-label="Next IPO order"
+                  >
+                    &#8594;
+                  </button>
+                </div>
+              ) : null}
+
               <div className="gmp-results-anchor" ref={gmpResultsTop} />
 
               {filteredGmp.length ? (
@@ -1057,6 +1145,7 @@ export default function Home() {
                         <div className="date-strip">
                           <span>Open {dateLabel(row.openDate)}</span>
                           <span>Close {dateLabel(row.closeDate)}</span>
+                          <span>Allot {dateLabel(row.allotmentDate)}</span>
                           <span>List {dateLabel(row.listingDate)}</span>
                         </div>
                       </div>

@@ -933,6 +933,60 @@ h3 {
   background: var(--brand);
 }
 
+.gmp-view-stepper {
+  display: grid;
+  grid-template-columns: 36px minmax(150px, 210px) 36px;
+  justify-content: end;
+  gap: 6px;
+  margin: -2px 0 12px;
+}
+
+.gmp-view-arrow {
+  display: grid;
+  width: 36px;
+  min-height: 36px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: #fff;
+  font-size: 1.05rem;
+  font-weight: 850;
+}
+
+.gmp-view-arrow:hover:not(:disabled) {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.gmp-view-label {
+  display: grid;
+  min-width: 0;
+  min-height: 36px;
+  align-content: center;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  text-align: center;
+}
+
+.gmp-view-label span {
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 750;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.gmp-view-label strong {
+  overflow: hidden;
+  font-size: 0.8rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .gmp-list {
   display: grid;
   gap: 10px;
@@ -1160,6 +1214,15 @@ h3 {
 
   .pan-control {
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .gmp-view-stepper {
+    grid-template-columns: 40px minmax(0, 1fr) 40px;
+    justify-content: stretch;
+  }
+
+  .gmp-view-arrow {
+    width: 40px;
   }
 
   .copy-pan-button {
