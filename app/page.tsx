@@ -469,12 +469,25 @@ export default function Home() {
     setRestoredPan(false);
     setChecking(true);
     lastCheckKey.current = checkKey;
+    const ipoReference = ipos.find((ipo) => ipo.id === ipoId);
 
     try {
       const response = await fetch("/api/allotment/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pans: [pan], ipoIds: [ipoId] })
+        body: JSON.stringify({
+          pans: [pan],
+          ipoIds: [ipoId],
+          ipoRefs: ipoReference
+            ? [
+                {
+                  id: ipoReference.id,
+                  name: ipoReference.name,
+                  closeDate: ipoReference.closeDate
+                }
+              ]
+            : undefined
+        })
       });
       const data = await response.json();
 
@@ -611,6 +624,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ipoId: result.ipoId,
+          ipoName: result.ipoName,
           pan: result.pan,
           captchaToken: captcha.token,
           captchaAnswer: captcha.answer

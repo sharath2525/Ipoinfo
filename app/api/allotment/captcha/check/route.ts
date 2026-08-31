@@ -1,11 +1,13 @@
 import * as cheerio from "cheerio";
 import { isValidPan, normalizePan } from "@/lib/pan";
-import { getIpoDataProvider } from "@/lib/providers/ipo-provider";
 import { classifyOfficialResult } from "@/lib/providers/allotment-result";
+import { resolveIpoReference } from "@/lib/providers/ipo-reference";
+import { getPublicIpoFeed } from "@/lib/providers/public-feed";
 import type { AllotmentResult, Ipo } from "@/lib/types";
 
 type RequestBody = {
   ipoId?: string;
+  ipoName?: string;
   pan?: string;
   captchaToken?: string;
   captchaAnswer?: string;
@@ -221,9 +223,11 @@ export async function POST(request: Request) {
   let ipo: Ipo | undefined;
 
   try {
-    ipo = (await getIpoDataProvider().listRecentIpos()).find(
-      (item) => item.id === body.ipoId
-    );
+    const feed = await getPublicIpoFeed();
+    ipo = resolveIpoReference(feed.ipos, {
+      id: body.ipoId,
+      name: body.ipoName
+    });
   } catch {
     return Response.json(
       {

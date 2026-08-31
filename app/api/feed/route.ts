@@ -1,7 +1,4 @@
-import { unstable_cache } from "next/cache";
-import { toGmpRows } from "@/lib/providers/gmp-provider";
-import { rememberClosedIpos } from "@/lib/providers/closed-history-backup";
-import { getIpoDataProvider } from "@/lib/providers/ipo-provider";
+import { getPublicIpoFeed } from "@/lib/providers/public-feed";
 
 export const dynamic = "force-dynamic";
 
@@ -9,26 +6,9 @@ const cacheHeaders = {
   "Cache-Control": "public, max-age=0, s-maxage=60, stale-while-revalidate=3600"
 };
 
-const loadCachedFeed = unstable_cache(
-  async () => {
-    const provider = getIpoDataProvider();
-    const ipos = await provider.listRecentIpos();
-    const gmp = toGmpRows(ipos);
-    rememberClosedIpos(gmp);
-
-    return {
-      ipos,
-      gmp,
-      meta: provider.getMeta()
-    };
-  },
-  ["public-ipo-feed-v1"],
-  { revalidate: 60 }
-);
-
 export async function GET() {
   try {
-    return Response.json(await loadCachedFeed(), { headers: cacheHeaders });
+    return Response.json(await getPublicIpoFeed(), { headers: cacheHeaders });
   } catch (error) {
     return Response.json(
       {
