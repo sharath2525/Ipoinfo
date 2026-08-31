@@ -1331,6 +1331,11 @@ h3 {
     width: 100%;
     box-shadow: 0 8px 24px rgba(25, 23, 19, 0.16);
   }
+
+  .result-reset.captcha-result-reset {
+    position: static;
+    box-shadow: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -277,6 +277,11 @@ export default function Home() {
   const ipoSelectElement = useRef<HTMLSelectElement>(null);
   const panInputElement = useRef<HTMLInputElement>(null);
   const autoCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const allotmentRequestId = useRef(0);
+  const allotmentController = useRef<AbortController | null>(null);
+  const activeCheckKey = useRef("");
+  const captchaRequestId = useRef(0);
+  const captchaController = useRef<AbortController | null>(null);
   const lastCheckKey = useRef("");
   const selectedIpoName = useRef(bundledAllotmentIpos[0]?.name ?? "");
 
@@ -294,6 +299,8 @@ export default function Home() {
 
     return () => {
       if (autoCheckTimer.current) clearTimeout(autoCheckTimer.current);
+      allotmentController.current?.abort();
+      captchaController.current?.abort();
     };
   }, []);
 
@@ -392,10 +399,23 @@ export default function Home() {
   );
   const currentResult = results?.results[0];
   const currentCaptcha = currentResult ? captchas[resultKey(currentResult)] : undefined;
+  const hasEnteredCaptcha = Boolean(currentCaptcha?.image && currentCaptcha.answer.trim());
   const closedTotalPages = Math.max(1, Math.ceil(closedTotal / closedPageSize));
   const closedPageNumbers = paginationWindow(closedPage, closedTotalPages);
   const closedRangeStart = closedTotal ? (closedPage - 1) * closedPageSize + 1 : 0;
   const closedRangeEnd = Math.min(closedPage * closedPageSize, closedTotal);
+
+  useEffect(() => {
+    if (!hasEnteredCaptcha) return;
+
+    const protectEnteredCaptcha = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", protectEnteredCaptcha);
+    return () => window.removeEventListener("beforeunload", protectEnteredCaptcha);
+  }, [hasEnteredCaptcha]);
 
   function resultKey(result: AllotmentResult) {
     return `${result.ipoId}:${result.pan}`;
@@ -405,7 +425,11 @@ export default function Home() {
     setResults((current) => {
       if (!current) return current;
       const nextResults = current.results.map((item) =>
-        item.ipoId === nextResult.ipoId && item.pan === nextResult.pan ? nextResult : item
+        item.pan === nextResult.pan &&
+        (item.ipoId === nextResult.ipoId ||
+          item.ipoName.trim().toLowerCase() === nextResult.ipoName.trim().toLowerCase())
+          ? nextResult
+          : item
       );
       const successfulChecks = nextResults.filter(
         (item) =>
@@ -425,7 +449,23 @@ export default function Home() {
     });
   }
 
+  function cancelAllotmentRequest() {
+    allotmentRequestId.current += 1;
+    allotmentController.current?.abort();
+    allotmentController.current = null;
+    activeCheckKey.current = "";
+    setChecking(false);
+  }
+
+  function cancelCaptchaRequest() {
+    captchaRequestId.current += 1;
+    captchaController.current?.abort();
+    captchaController.current = null;
+  }
+
   function selectAllotmentIpo(ipo: Ipo) {
+    cancelAllotmentRequest();
+    cancelCaptchaRequest();
     selectedIpoName.current = ipo.name;
     setSelectedIpoId(ipo.id);
     setResults(null);
@@ -493,8 +533,6 @@ export default function Home() {
     if (autoCheckTimer.current) clearTimeout(autoCheckTimer.current);
     setCheckError("");
     setPanError("");
-    setResults(null);
-    setCaptchas({});
 
     const pan = normalizePan(panValue);
     const checkKey = `${ipoId}:${pan}`;
@@ -514,10 +552,20 @@ export default function Home() {
       return;
     }
 
-    if (checking || (!force && lastCheckKey.current === checkKey)) return;
+    if (activeCheckKey.current === checkKey) return;
+    if (!force && lastCheckKey.current === checkKey) return;
+
+    cancelAllotmentRequest();
+    cancelCaptchaRequest();
+    const requestId = ++allotmentRequestId.current;
+    const controller = new AbortController();
+    allotmentController.current = controller;
+    activeCheckKey.current = checkKey;
 
     setPanInput(pan);
     setRestoredPan(false);
+    setResults(null);
+    setCaptchas({});
     setChecking(true);
     lastCheckKey.current = checkKey;
     const ipoReference = ipos.find((ipo) => ipo.id === ipoId);
@@ -538,13 +586,16 @@ export default function Home() {
                 }
               ]
             : undefined
-        })
+        }),
+        signal: controller.signal
       });
       const data = await response.json();
 
       if (!response.ok) {
         throw new Error(data.error ?? "Allotment check failed.");
       }
+
+      if (requestId !== allotmentRequestId.current) return;
 
       setResults(data as BatchCheckResponse);
       if (rememberPan) {
@@ -555,20 +606,28 @@ export default function Home() {
         }
       }
     } catch (error) {
+      if (controller.signal.aborted || requestId !== allotmentRequestId.current) return;
       lastCheckKey.current = "";
       setCheckError(error instanceof Error ? error.message : "Unable to complete this check.");
     } finally {
-      setChecking(false);
+      if (requestId === allotmentRequestId.current) {
+        allotmentController.current = null;
+        activeCheckKey.current = "";
+        setChecking(false);
+      }
     }
   }
 
   function updatePan(nextValue: string) {
     const pan = normalizePan(nextValue).replace(/[^A-Z0-9]/g, "").slice(0, 10);
+    cancelAllotmentRequest();
+    cancelCaptchaRequest();
     setPanInput(pan);
     setPanError("");
     setPanCopied(false);
     setRestoredPan(false);
     setResults(null);
+    setCaptchas({});
     lastCheckKey.current = "";
     scheduleAutoCheck(pan, selectedIpoId);
   }
@@ -603,6 +662,8 @@ export default function Home() {
   }
 
   function checkAnotherIpo() {
+    cancelAllotmentRequest();
+    cancelCaptchaRequest();
     setResults(null);
     setCaptchas({});
     setCheckError("");
@@ -610,8 +671,12 @@ export default function Home() {
     requestAnimationFrame(() => ipoSelectElement.current?.focus());
   }
 
-  async function loadCaptcha(result: AllotmentResult) {
+  async function loadCaptcha(result: AllotmentResult, notice = "") {
     const key = resultKey(result);
+    cancelCaptchaRequest();
+    const requestId = ++captchaRequestId.current;
+    const controller = new AbortController();
+    captchaController.current = controller;
     setCaptchas((current) => ({
       ...current,
       [key]: { ...current[key], answer: current[key]?.answer ?? "", loading: true, error: "" }
@@ -619,11 +684,13 @@ export default function Home() {
 
     try {
       const response = await fetch(
-        `/api/allotment/captcha?registrar=${encodeURIComponent(result.registrar)}`
+        `/api/allotment/captcha?registrar=${encodeURIComponent(result.registrar)}`,
+        { signal: controller.signal }
       );
       const data = await response.json();
 
       if (!response.ok) throw new Error(data.error ?? "Could not load CAPTCHA.");
+      if (requestId !== captchaRequestId.current) return;
 
       setCaptchas((current) => ({
         ...current,
@@ -632,10 +699,11 @@ export default function Home() {
           image: data.image,
           answer: "",
           loading: false,
-          error: ""
+          error: notice
         }
       }));
     } catch (error) {
+      if (controller.signal.aborted || requestId !== captchaRequestId.current) return;
       setCaptchas((current) => ({
         ...current,
         [key]: {
@@ -645,6 +713,8 @@ export default function Home() {
           error: error instanceof Error ? error.message : "Could not load CAPTCHA."
         }
       }));
+    } finally {
+      if (requestId === captchaRequestId.current) captchaController.current = null;
     }
   }
 
@@ -664,6 +734,12 @@ export default function Home() {
       return;
     }
 
+    if (captchaController.current) return;
+
+    const requestId = ++captchaRequestId.current;
+    const controller = new AbortController();
+    captchaController.current = controller;
+
     setCaptchas((current) => ({
       ...current,
       [key]: { ...current[key], loading: true, error: "" }
@@ -679,19 +755,33 @@ export default function Home() {
           pan: result.pan,
           captchaToken: captcha.token,
           captchaAnswer: captcha.answer
-        })
+        }),
+        signal: controller.signal
       });
       const data = await response.json();
 
       if (!response.ok) throw new Error(data.error ?? "CAPTCHA check failed.");
+      if (requestId !== captchaRequestId.current) return;
 
-      replaceResult(data.result as AllotmentResult);
+      const nextResult = data.result as AllotmentResult;
+      replaceResult(nextResult);
+
+      if (nextResult.status === "captcha_required") {
+        captchaController.current = null;
+        await loadCaptcha(
+          nextResult,
+          nextResult.error ?? "The CAPTCHA was rejected. A fresh challenge was loaded."
+        );
+        return;
+      }
+
       setCaptchas((current) => {
         const next = { ...current };
         delete next[key];
         return next;
       });
     } catch (error) {
+      if (controller.signal.aborted || requestId !== captchaRequestId.current) return;
       setCaptchas((current) => ({
         ...current,
         [key]: {
@@ -700,6 +790,8 @@ export default function Home() {
           error: error instanceof Error ? error.message : "CAPTCHA check failed."
         }
       }));
+    } finally {
+      if (requestId === captchaRequestId.current) captchaController.current = null;
     }
   }
 
@@ -1040,7 +1132,11 @@ export default function Home() {
                     )}
 
                     <button
-                      className="secondary result-reset"
+                      className={`secondary result-reset${
+                        currentResult.status === "captcha_required"
+                          ? " captcha-result-reset"
+                          : ""
+                      }`}
                       onClick={checkAnotherIpo}
                       type="button"
                     >

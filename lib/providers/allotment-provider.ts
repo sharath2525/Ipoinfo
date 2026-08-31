@@ -1,5 +1,6 @@
 import { createCipheriv } from "crypto";
 import * as cheerio from "cheerio";
+import { fetchWithTimeout } from "@/lib/fetch-timeout";
 import {
   classifyOfficialResult,
   containsExplicitNoRecord
@@ -40,7 +41,7 @@ function numberFrom(value?: string | number | null) {
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(body),
@@ -197,7 +198,7 @@ async function checkMufg(ipo: Ipo, pan: string, checkedAt: string) {
 }
 
 async function loadKfinIssues() {
-  const pageResponse = await fetch(KFIN_BASE_URL, { cache: "no-store" });
+  const pageResponse = await fetchWithTimeout(KFIN_BASE_URL, { cache: "no-store" });
 
   if (!pageResponse.ok) {
     throw new Error(`KFinTech issue page returned ${pageResponse.status}`);
@@ -213,7 +214,9 @@ async function loadKfinIssues() {
     throw new Error("KFinTech issue bundle was not found");
   }
 
-  const response = await fetch(new URL(bundlePath, KFIN_BASE_URL), { cache: "no-store" });
+  const response = await fetchWithTimeout(new URL(bundlePath, KFIN_BASE_URL), {
+    cache: "no-store"
+  });
 
   if (!response.ok) {
     throw new Error(`KFinTech app returned ${response.status}`);
@@ -318,7 +321,7 @@ async function checkKfin(ipo: Ipo, pan: string, checkedAt: string) {
     };
   }
 
-  const response = await fetch(`${KFIN_QUERY_URL}pan`, {
+  const response = await fetchWithTimeout(`${KFIN_QUERY_URL}pan`, {
     headers: {
       reqparam: pan,
       client_id: clientId

@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { fetchWithTimeout } from "@/lib/fetch-timeout";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import { classifyOfficialResult } from "@/lib/providers/allotment-result";
 import { resolveIpoReference } from "@/lib/providers/ipo-reference";
@@ -34,7 +35,7 @@ function numberFrom(value?: string | number | null) {
 }
 
 async function bigshareCompanyId(ipo: Ipo) {
-  const response = await fetch("https://ipo.bigshareonline.com/ipo_status.html", {
+  const response = await fetchWithTimeout("https://ipo.bigshareonline.com/ipo_status.html", {
     cache: "no-store"
   });
 
@@ -271,7 +272,7 @@ export async function POST(request: Request) {
   let response: Response;
 
   try {
-    response = await fetch("https://ipo.bigshareonline.com/Data.aspx/FetchIpodetails", {
+    response = await fetchWithTimeout("https://ipo.bigshareonline.com/Data.aspx/FetchIpodetails", {
       method: "POST",
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({

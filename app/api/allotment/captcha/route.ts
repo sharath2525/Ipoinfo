@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "@/lib/fetch-timeout";
+
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
@@ -12,7 +14,7 @@ export async function GET(request: Request) {
       );
     }
 
-    const response = await fetch("https://ipo.bigshareonline.com/Captcha.ashx", {
+    const response = await fetchWithTimeout("https://ipo.bigshareonline.com/Captcha.ashx", {
       cache: "no-store"
     });
 
