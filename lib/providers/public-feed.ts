@@ -16,6 +16,6 @@ export const getPublicIpoFeed = unstable_cache(
       meta: provider.getMeta()
     };
   },
-  ["public-ipo-feed-v1"],
+  ["public-ipo-feed-v5"],
   { revalidate: 60 }
 );

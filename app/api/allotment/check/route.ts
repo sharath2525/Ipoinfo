@@ -14,11 +14,35 @@ type RequestBody = {
 
 export const dynamic = "force-dynamic";
 
+function isRequestBody(value: unknown): value is RequestBody {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const body = value as RequestBody;
+
+  return (
+    (body.pans === undefined ||
+      (Array.isArray(body.pans) && body.pans.every((pan) => typeof pan === "string"))) &&
+    (body.ipoIds === undefined ||
+      (Array.isArray(body.ipoIds) && body.ipoIds.every((id) => typeof id === "string"))) &&
+    (body.ipoRefs === undefined ||
+      (Array.isArray(body.ipoRefs) &&
+        body.ipoRefs.every(
+          (reference) =>
+            Boolean(reference) &&
+            typeof reference === "object" &&
+            typeof reference.id === "string" &&
+            (reference.name === undefined || typeof reference.name === "string") &&
+            (reference.closeDate === undefined || typeof reference.closeDate === "string")
+        )))
+  );
+}
+
 export async function POST(request: Request) {
   let body: RequestBody;
 
   try {
-    body = (await request.json()) as RequestBody;
+    const payload: unknown = await request.json();
+    if (!isRequestBody(payload)) throw new Error("Invalid request shape");
+    body = payload;
   } catch {
     return Response.json({ error: "Invalid JSON request." }, { status: 400 });
   }

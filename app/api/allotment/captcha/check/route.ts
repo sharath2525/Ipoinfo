@@ -14,6 +14,23 @@ type RequestBody = {
   captchaAnswer?: string;
 };
 
+type BigsharePayload = {
+  APPLICATION_NO?: string;
+  DPID?: string;
+  Name?: string;
+  APPLIED?: string;
+  ALLOTED?: string;
+  Status?: string;
+  Message?: string;
+  Records?: Array<{
+    APPLICATION_NO?: string;
+    DPID?: string;
+    Name?: string;
+    APPLIED?: string;
+    ALLOTED?: string;
+  }>;
+};
+
 export const dynamic = "force-dynamic";
 
 function normalizeKey(name: string) {
@@ -32,6 +49,22 @@ function numberFrom(value?: string | number | null) {
   if (!value) return 0;
   const match = value.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
   return match ? Number(match[0]) : 0;
+}
+
+function isRequestBody(value: unknown): value is RequestBody {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  return ["ipoId", "ipoName", "pan", "captchaToken", "captchaAnswer"].every(
+    (key) => body[key] === undefined || typeof body[key] === "string"
+  );
+}
+
+function parseBigsharePayload(value: unknown): BigsharePayload {
+  const parsed = typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid Bigshare payload");
+  }
+  return parsed as BigsharePayload;
 }
 
 async function bigshareCompanyId(ipo: Ipo) {
@@ -67,22 +100,7 @@ async function bigshareCompanyId(ipo: Ipo) {
 function resultFromBigsharePayload(
   ipo: Ipo,
   pan: string,
-  payload: {
-    APPLICATION_NO?: string;
-    DPID?: string;
-    Name?: string;
-    APPLIED?: string;
-    ALLOTED?: string;
-    Status?: string;
-    Message?: string;
-    Records?: Array<{
-      APPLICATION_NO?: string;
-      DPID?: string;
-      Name?: string;
-      APPLIED?: string;
-      ALLOTED?: string;
-    }>;
-  }
+  payload: BigsharePayload
 ): AllotmentResult {
   const checkedAt = new Date().toISOString();
   const record = payload.Records?.[0] ?? payload;
@@ -202,7 +220,9 @@ export async function POST(request: Request) {
   let body: RequestBody;
 
   try {
-    body = (await request.json()) as RequestBody;
+    const payload: unknown = await request.json();
+    if (!isRequestBody(payload)) throw new Error("Invalid request shape");
+    body = payload;
   } catch {
     return Response.json({ error: "Invalid JSON request." }, { status: 400 });
   }
@@ -219,6 +239,10 @@ export async function POST(request: Request) {
 
   if (!body.captchaToken || !body.captchaAnswer) {
     return Response.json({ error: "CAPTCHA answer is required." }, { status: 400 });
+  }
+
+  if (body.captchaToken.length > 2048 || body.captchaAnswer.length > 20) {
+    return Response.json({ error: "CAPTCHA request is invalid." }, { status: 400 });
   }
 
   let ipo: Ipo | undefined;
@@ -308,10 +332,9 @@ export async function POST(request: Request) {
   }
 
   try {
-    const payload = (await response.json()) as {
-      d: Parameters<typeof resultFromBigsharePayload>[2];
-    };
-    return Response.json({ result: resultFromBigsharePayload(ipo, pan, payload.d) });
+    const payload = (await response.json()) as { d?: unknown };
+    const resultPayload = parseBigsharePayload(payload?.d);
+    return Response.json({ result: resultFromBigsharePayload(ipo, pan, resultPayload) });
   } catch {
     return Response.json(
       { error: "Bigshare returned an unreadable response." },

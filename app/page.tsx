@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import closedIpoSeed from "@/data/closed-ipo-backup.json";
+import { cleanIpoName, effectiveIpoStatus, ipoNameKey } from "@/lib/ipo-normalization";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
@@ -15,8 +16,16 @@ const gmpViewModes = [
 ] as const;
 const closedPageSizes = [25, 50, 100] as const;
 const REMEMBERED_PAN_KEY = "ipo-fast-check:remembered-pan";
-const PUBLIC_FEED_CACHE_KEY = "ipo-fast-check:public-feed-v1";
+const PUBLIC_FEED_CACHE_KEY = "ipo-fast-check:public-feed-v5";
+const PREVIOUS_PUBLIC_FEED_CACHE_KEYS = [
+  "ipo-fast-check:public-feed-v4",
+  "ipo-fast-check:public-feed-v3",
+  "ipo-fast-check:public-feed-v2",
+  "ipo-fast-check:public-feed-v1"
+] as const;
 const PUBLIC_FEED_CACHE_MAX_AGE = 6 * 60 * 60 * 1000;
+const PUBLIC_FEED_REFRESH_INTERVAL = 60 * 1000;
+const PUBLIC_FEED_RETRY_INTERVAL = 15 * 1000;
 
 type PublicFeed = {
   ipos: Ipo[];
@@ -84,6 +93,24 @@ function dateLabel(value?: string) {
   }).format(date);
 }
 
+function allotmentReleaseLabel(ipo: Ipo) {
+  const sourceLabel = ipo.allotmentStatusText?.trim();
+  const allotmentDate = parseDate(ipo.allotmentDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (
+    sourceLabel &&
+    /\b(?:due|expected)\s+today\b/i.test(sourceLabel) &&
+    allotmentDate &&
+    allotmentDate < today
+  ) {
+    return "Awaiting registrar confirmation";
+  }
+
+  return sourceLabel || statusLabel(ipo.allotmentAvailability);
+}
+
 function statusLabel(value: string) {
   if (value === "allotment_out") return "Allotment Result Out";
   if (value === "available") return "Allotment Out";
@@ -143,6 +170,66 @@ function dateTime(value?: string) {
   return parseDate(value)?.getTime() ?? 0;
 }
 
+function normalizedIpoName(value: string) {
+  return ipoNameKey(value);
+}
+
+function normalizeIposForDisplay(rows: Ipo[]) {
+  const unique = new Map<string, Ipo>();
+
+  for (const sourceRow of rows) {
+    const row = {
+      ...sourceRow,
+      name: cleanIpoName(sourceRow.name),
+      status: effectiveIpoStatus(sourceRow)
+    };
+    const key = normalizedIpoName(row.name) || row.id;
+    const existing = unique.get(key);
+
+    unique.set(key, existing ? { ...existing, ...row, id: existing.id || row.id } : row);
+  }
+
+  return [...unique.values()];
+}
+
+function normalizeGmpRowsForDisplay(rows: GmpRow[]) {
+  const unique = new Map<string, GmpRow>();
+
+  for (const sourceRow of rows) {
+    const row = {
+      ...sourceRow,
+      name: cleanIpoName(sourceRow.name),
+      status: effectiveIpoStatus(sourceRow)
+    };
+    const key = normalizedIpoName(row.name) || row.id;
+    const existing = unique.get(key);
+    if (!existing) {
+      unique.set(key, row);
+      continue;
+    }
+
+    const existingTime = dateTime(existing.gmpLastUpdated);
+    const rowTime = dateTime(row.gmpLastUpdated);
+    const primary = rowTime >= existingTime ? row : existing;
+    const secondary = primary === row ? existing : row;
+    unique.set(key, {
+      ...secondary,
+      ...primary,
+      id: existing.id || row.id,
+      marketType: primary.marketType || secondary.marketType,
+      issuePriceMin: primary.issuePriceMin || secondary.issuePriceMin,
+      issuePriceMax: primary.issuePriceMax || secondary.issuePriceMax,
+      lotSize: primary.lotSize || secondary.lotSize,
+      openDate: primary.openDate || secondary.openDate,
+      closeDate: primary.closeDate || secondary.closeDate,
+      allotmentDate: primary.allotmentDate || secondary.allotmentDate,
+      listingDate: primary.listingDate || secondary.listingDate
+    });
+  }
+
+  return [...unique.values()];
+}
+
 function sortGmpRows(rows: GmpRow[]) {
   return [...rows].sort((first, second) => {
     if (first.status === "upcoming") {
@@ -157,8 +244,9 @@ function sortGmpRows(rows: GmpRow[]) {
 }
 
 function gmpGroup(row: GmpRow): "open" | "upcoming" | "closed" {
-  if (row.status === "open") return "open";
-  if (row.status === "upcoming") return "upcoming";
+  const status = effectiveIpoStatus(row);
+  if (status === "open") return "open";
+  if (status === "upcoming") return "upcoming";
   return "closed";
 }
 
@@ -200,13 +288,8 @@ function sortCurrentGmpRows(
 }
 
 function isCompletedIpo(ipo: Ipo) {
-  const closeDate = parseDate(ipo.closeDate);
-  return (
-    ipo.status === "closed" ||
-    ipo.status === "listing_soon" ||
-    ipo.status === "listed" ||
-    (closeDate ? closeDate < new Date() : false)
-  );
+  const status = effectiveIpoStatus(ipo);
+  return status === "closed" || status === "listing_soon" || status === "listed";
 }
 
 function isLastOrThisMonthResult(ipo: Ipo) {
@@ -231,7 +314,11 @@ function recentResultsFirst(ipos: Ipo[]) {
       parseDate(second.allotmentDate)?.getTime() ??
       0;
 
-    return secondTime - firstTime;
+    return (
+      secondTime - firstTime ||
+      dateTime(second.allotmentDate) - dateTime(first.allotmentDate) ||
+      first.name.localeCompare(second.name)
+    );
   });
 }
 
@@ -258,6 +345,7 @@ export default function Home() {
   const [restoredPan, setRestoredPan] = useState(false);
   const [panCopied, setPanCopied] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [feedLoading, setFeedLoading] = useState(true);
   const [checkError, setCheckError] = useState("");
   const [checking, setChecking] = useState(false);
   const [results, setResults] = useState<BatchCheckResponse | null>(null);
@@ -284,6 +372,28 @@ export default function Home() {
   const captchaController = useRef<AbortController | null>(null);
   const lastCheckKey = useRef("");
   const selectedIpoName = useRef(bundledAllotmentIpos[0]?.name ?? "");
+  const allotmentSelectionLocked = useRef(false);
+
+  useEffect(() => {
+    const restoreViewFromHash = () => {
+      const hash = window.location.hash.toLowerCase();
+      if (!hash.startsWith("#gmp")) {
+        setActiveTab("allotment");
+        return;
+      }
+
+      setActiveTab("gmp");
+      const restoredFilter = gmpFilters.find((filter) => hash === `#gmp-${filter}`);
+      if (restoredFilter) {
+        setGmpFilter(restoredFilter);
+        setClosedPage(1);
+      }
+    };
+
+    restoreViewFromHash();
+    window.addEventListener("hashchange", restoreViewFromHash);
+    return () => window.removeEventListener("hashchange", restoreViewFromHash);
+  }, []);
 
   useEffect(() => {
     try {
@@ -305,51 +415,84 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let stopped = false;
+    let requestInFlight = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
     function applyPublicFeed(data: PublicFeed) {
-      if (!Array.isArray(data.ipos) || !Array.isArray(data.gmp)) return false;
+      if (!Array.isArray(data.ipos) || !Array.isArray(data.gmp)) return;
 
-      const allotmentChoices = recentResultsFirst(
-        data.ipos.filter(isLastOrThisMonthResult)
-      );
-      const nextChoice =
-        allotmentChoices.find((ipo) => ipo.name === selectedIpoName.current) ??
-        allotmentChoices[0];
+      const normalizedIpos = normalizeIposForDisplay(data.ipos);
+      const normalizedGmp = normalizeGmpRowsForDisplay(data.gmp);
 
-      setIpos(data.ipos);
-      setSelectedIpoId(nextChoice?.id ?? "");
-      selectedIpoName.current = nextChoice?.name ?? "";
-      setGmpRows(data.gmp);
+      if (normalizedIpos.length) {
+        const allotmentChoices = recentResultsFirst(
+          normalizedIpos.filter(isLastOrThisMonthResult)
+        );
+        const selectedName = normalizedIpoName(selectedIpoName.current);
+        const preservedChoice = allotmentSelectionLocked.current
+          ? allotmentChoices.find(
+              (ipo) => normalizedIpoName(ipo.name) === selectedName
+            )
+          : undefined;
+        const nextChoice = preservedChoice ?? allotmentChoices[0];
+
+        setIpos(normalizedIpos);
+        setSelectedIpoId(nextChoice?.id ?? "");
+        selectedIpoName.current = nextChoice?.name ?? "";
+      }
+      if (normalizedGmp.length) setGmpRows(normalizedGmp);
       setLoadError("");
-      return data.ipos.length > 0;
+      setFeedLoading(false);
+      hasUsableGmp = normalizedGmp.length > 0 || hasUsableGmp;
+    }
+
+    let hasUsableGmp = false;
+    function loadCachedFeed() {
+      for (const cacheKey of [
+        PUBLIC_FEED_CACHE_KEY,
+        ...PREVIOUS_PUBLIC_FEED_CACHE_KEYS
+      ]) {
+        try {
+          const stored = JSON.parse(
+            localStorage.getItem(cacheKey) ?? "null"
+          ) as StoredPublicFeed | null;
+          if (
+            stored &&
+            Number.isFinite(stored.cachedAt) &&
+            Date.now() - stored.cachedAt <= PUBLIC_FEED_CACHE_MAX_AGE
+          ) {
+            applyPublicFeed(stored);
+            break;
+          }
+        } catch {
+          // Ignore a damaged entry and continue with the next cache version.
+        }
+      }
     }
 
     async function loadData() {
-      let hasUsableFeed = bundledAllotmentIpos.length > 0;
+      if (stopped || requestInFlight) return;
+      requestInFlight = true;
+      if (!hasUsableGmp) setFeedLoading(true);
 
       try {
-        const stored = JSON.parse(
-          localStorage.getItem(PUBLIC_FEED_CACHE_KEY) ?? "null"
-        ) as StoredPublicFeed | null;
-        if (
-          stored &&
-          Number.isFinite(stored.cachedAt) &&
-          Date.now() - stored.cachedAt <= PUBLIC_FEED_CACHE_MAX_AGE
-        ) {
-          hasUsableFeed = applyPublicFeed(stored) || hasUsableFeed;
-        }
-      } catch {
-        // The bundled list still makes the first screen usable without storage.
-      }
-
-      try {
-        const response = await fetch("/api/feed");
+        const response = await fetch("/api/feed", { cache: "no-store" });
         const data = (await response.json()) as PublicFeed;
 
         if (!response.ok) {
           throw new Error("IPO data is temporarily unavailable.");
         }
+        if (!Array.isArray(data.ipos) || !Array.isArray(data.gmp) || !data.gmp.length) {
+          throw new Error("The live IPO feed returned an incomplete update.");
+        }
 
-        hasUsableFeed = applyPublicFeed(data) || hasUsableFeed;
+        if (stopped) return;
+        applyPublicFeed(data);
+        if (retryTimer) {
+          clearTimeout(retryTimer);
+          retryTimer = null;
+        }
         try {
           localStorage.setItem(
             PUBLIC_FEED_CACHE_KEY,
@@ -359,13 +502,42 @@ export default function Home() {
           // Public-feed caching is an optional speed enhancement.
         }
       } catch (error) {
-        if (!hasUsableFeed) {
-          setLoadError(error instanceof Error ? error.message : "Could not load IPO data.");
+        if (stopped) return;
+        setLoadError(
+          hasUsableGmp
+            ? "Live data refresh is retrying automatically. Showing the last successful update."
+            : error instanceof Error
+              ? `${error.message} Retrying automatically...`
+              : "Could not load IPO data. Retrying automatically..."
+        );
+        if (!hasUsableGmp && !retryTimer) {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            void loadData();
+          }, PUBLIC_FEED_RETRY_INTERVAL);
         }
+      } finally {
+        requestInFlight = false;
+        if (!stopped) setFeedLoading(false);
       }
     }
 
-    loadData();
+    loadCachedFeed();
+    void loadData();
+    const refreshInterval = setInterval(() => {
+      void loadData();
+    }, PUBLIC_FEED_REFRESH_INTERVAL);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadData();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      stopped = true;
+      clearInterval(refreshInterval);
+      if (retryTimer) clearTimeout(retryTimer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, []);
 
   useEffect(() => {
@@ -375,7 +547,9 @@ export default function Home() {
   }, [activeTab, closedPage, closedPageSize, gmpFilter]);
 
   const filteredGmp = useMemo(() => {
-    const sourceRows = gmpFilter === "closed" ? closedGmpRows : gmpRows;
+    const sourceRows = normalizeGmpRowsForDisplay(
+      gmpFilter === "closed" ? closedGmpRows : gmpRows
+    );
     const matchingRows = sourceRows.filter((row) => {
       const matchesFilter = gmpGroup(row) === gmpFilter;
       const matchesSearch = row.name
@@ -419,6 +593,26 @@ export default function Home() {
 
   function resultKey(result: AllotmentResult) {
     return `${result.ipoId}:${result.pan}`;
+  }
+
+  function updateViewHash(tab: "allotment" | "gmp", filter = gmpFilter) {
+    const hash = tab === "allotment" ? "#allotment" : `#gmp-${filter}`;
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}${hash}`
+    );
+  }
+
+  function selectPrimaryTab(tab: "allotment" | "gmp") {
+    setActiveTab(tab);
+    updateViewHash(tab);
+  }
+
+  function selectGmpFilter(filter: (typeof gmpFilters)[number]) {
+    setGmpFilter(filter);
+    setClosedPage(1);
+    updateViewHash("gmp", filter);
   }
 
   function replaceResult(nextResult: AllotmentResult) {
@@ -466,6 +660,7 @@ export default function Home() {
   function selectAllotmentIpo(ipo: Ipo) {
     cancelAllotmentRequest();
     cancelCaptchaRequest();
+    allotmentSelectionLocked.current = true;
     selectedIpoName.current = ipo.name;
     setSelectedIpoId(ipo.id);
     setResults(null);
@@ -494,7 +689,9 @@ export default function Home() {
     const offset = (page - 1) * pageSize;
 
     try {
-      const response = await fetch(`/api/gmp/history?offset=${offset}&limit=${pageSize}`);
+      const response = await fetch(`/api/gmp/history?offset=${offset}&limit=${pageSize}`, {
+        cache: "no-store"
+      });
       const data = (await response.json()) as {
         gmp?: GmpRow[];
         total?: number;
@@ -507,7 +704,7 @@ export default function Home() {
 
       if (requestId !== closedRequestId.current) return;
 
-      setClosedGmpRows(sortGmpRows(data.gmp ?? []));
+      setClosedGmpRows(sortGmpRows(normalizeGmpRowsForDisplay(data.gmp ?? [])));
       setClosedTotal(data.total ?? 0);
       setClosedLoaded(true);
       if (page > 1) {
@@ -620,6 +817,7 @@ export default function Home() {
 
   function updatePan(nextValue: string) {
     const pan = normalizePan(nextValue).replace(/[^A-Z0-9]/g, "").slice(0, 10);
+    if (pan) allotmentSelectionLocked.current = true;
     cancelAllotmentRequest();
     cancelCaptchaRequest();
     setPanInput(pan);
@@ -810,14 +1008,14 @@ export default function Home() {
           <nav className="tabs" aria-label="Primary">
             <button
               className={`tab ${activeTab === "allotment" ? "active" : ""}`}
-              onClick={() => setActiveTab("allotment")}
+              onClick={() => selectPrimaryTab("allotment")}
               type="button"
             >
               IPO Allotment
             </button>
             <button
               className={`tab ${activeTab === "gmp" ? "active" : ""}`}
-              onClick={() => setActiveTab("gmp")}
+              onClick={() => selectPrimaryTab("gmp")}
               type="button"
             >
               GMP
@@ -872,9 +1070,7 @@ export default function Home() {
                           {dateLabel(selectedIpo.allotmentDate)}
                         </span>
                         <span>
-                          Live update:{" "}
-                          {selectedIpo.allotmentStatusText ||
-                            statusLabel(selectedIpo.allotmentAvailability)}
+                          Live update: {allotmentReleaseLabel(selectedIpo)}
                         </span>
                       </div>
                     ) : null}
@@ -960,7 +1156,7 @@ export default function Home() {
                 <div className="actions">
                   <button
                     className="primary"
-                    disabled={checking || !ipos.length}
+                    disabled={checking || !selectedIpo || !allotmentIpos.length}
                     onClick={() => void checkAllotment(panInput, selectedIpoId, true)}
                     type="button"
                   >
@@ -1073,15 +1269,20 @@ export default function Home() {
                             <input
                               className="captcha-input"
                               value={currentCaptcha.answer}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                const answer = event.target.value
+                                  .toUpperCase()
+                                  .replace(/[^A-Z0-9]/g, "")
+                                  .slice(0, 20);
                                 setCaptchas((current) => ({
                                   ...current,
                                   [resultKey(currentResult)]: {
                                     ...current[resultKey(currentResult)],
-                                    answer: event.target.value
+                                    answer
                                   }
-                                }))
-                              }
+                                }));
+                              }}
+                              maxLength={20}
                               placeholder="CAPTCHA"
                               aria-label={`CAPTCHA for ${currentResult.ipoName}`}
                             />
@@ -1171,7 +1372,7 @@ export default function Home() {
                     <button
                       className={`filter ${gmpFilter === filter ? "active" : ""}`}
                       key={filter}
-                      onClick={() => setGmpFilter(filter)}
+                      onClick={() => selectGmpFilter(filter)}
                       type="button"
                     >
                       {statusLabel(filter)}
@@ -1341,9 +1542,21 @@ export default function Home() {
                 </div>
               ) : (
                 <div className="empty">
-                  {closedLoading ? "Loading closed IPO history..." : "No GMP rows match this view."}
+                  {closedLoading
+                    ? "Loading closed IPO history..."
+                    : feedLoading && gmpFilter !== "closed"
+                      ? "Loading current IPO data..."
+                      : loadError && gmpFilter !== "closed"
+                        ? loadError
+                        : gmpSearch.trim()
+                          ? "No IPOs match this search."
+                          : `No ${statusLabel(gmpFilter).toLowerCase()} IPOs are available right now.`}
                 </div>
               )}
+
+              {loadError && gmpFilter !== "closed" && filteredGmp.length ? (
+                <p className="error-text">{loadError}</p>
+              ) : null}
 
               {closedError && gmpFilter === "closed" ? (
                 <p className="error-text">{closedError}</p>

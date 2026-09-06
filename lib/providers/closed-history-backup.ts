@@ -1,14 +1,11 @@
 import closedIpoSeed from "@/data/closed-ipo-backup.json";
+import { cleanIpoName, effectiveIpoStatus, ipoNameKey, isClosedIpo } from "@/lib/ipo-normalization";
 import type { GmpRow } from "@/lib/types";
 
 const memoryBackup = new Map<string, GmpRow>();
 
 function normalizedName(name: string) {
-  return name
-    .toLowerCase()
-    .replace(/\b(ipo|limited|ltd|mainboard|sme|bse|nse)\b/g, " ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+  return ipoNameKey(name);
 }
 
 function timestamp(value?: string) {
@@ -42,13 +39,22 @@ function mergeRow(existing: GmpRow, incoming: GmpRow): GmpRow {
 }
 
 function isClosed(row: GmpRow) {
-  return row.status !== "open" && row.status !== "upcoming";
+  return isClosedIpo(row);
+}
+
+function normalizeRow(row: GmpRow): GmpRow {
+  return {
+    ...row,
+    name: cleanIpoName(row.name),
+    status: effectiveIpoStatus(row)
+  };
 }
 
 export function mergeClosedHistoryRows(...groups: GmpRow[][]) {
   const merged = new Map<string, GmpRow>();
 
-  for (const row of groups.flat()) {
+  for (const sourceRow of groups.flat()) {
+    const row = normalizeRow(sourceRow);
     if (!isClosed(row)) continue;
     const key = normalizedName(row.name) || row.id;
     const existing = merged.get(key);
@@ -63,7 +69,8 @@ export function mergeClosedHistoryRows(...groups: GmpRow[][]) {
 }
 
 export function rememberClosedIpos(rows: GmpRow[]) {
-  for (const row of rows) {
+  for (const sourceRow of rows) {
+    const row = normalizeRow(sourceRow);
     if (!isClosed(row)) continue;
     const key = normalizedName(row.name) || row.id;
     const existing = memoryBackup.get(key);

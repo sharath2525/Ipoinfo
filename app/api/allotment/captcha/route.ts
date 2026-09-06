@@ -25,7 +25,17 @@ export async function GET(request: Request) {
       );
     }
 
-    return Response.json(await response.json());
+    const payload: unknown = await response.json();
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("Invalid CAPTCHA response");
+    }
+
+    const { token, image } = payload as { token?: unknown; image?: unknown };
+    if (typeof token !== "string" || !token || typeof image !== "string" || !image) {
+      throw new Error("Incomplete CAPTCHA response");
+    }
+
+    return Response.json({ token, image });
   } catch {
     return Response.json(
       {

@@ -24,10 +24,8 @@ export function withinIpoWindow(ipo: Ipo, now = new Date()) {
     parseDate(ipo.listingDate)
   ].filter(Boolean) as Date[];
 
-  return (
-    ipo.status === "upcoming" ||
-    dates.some((date) => date >= windowStart && date < windowEnd)
-  );
+  if (!dates.length) return ipo.status === "upcoming";
+  return dates.some((date) => date >= windowStart && date < windowEnd);
 }
 
 export function sortIposForUtility(ipos: Ipo[]) {

@@ -1,15 +1,16 @@
-import { getGmpProvider, toGmpRows } from "@/lib/providers/gmp-provider";
+import { toGmpRows } from "@/lib/providers/gmp-provider";
 import {
   getClosedIpoBackup,
   mergeClosedHistoryRows,
   rememberClosedIpos
 } from "@/lib/providers/closed-history-backup";
 import { fetchIpoPremiumIposPage } from "@/lib/providers/live-provider";
+import { getPublicIpoFeed } from "@/lib/providers/public-feed";
 
 export const dynamic = "force-dynamic";
 
 const historyCacheHeaders = {
-  "Cache-Control": "public, max-age=0, s-maxage=300, stale-while-revalidate=1800"
+  "Cache-Control": "public, max-age=0, s-maxage=60, stale-while-revalidate=300"
 };
 
 function boundedNumber(value: string | null, fallback: number, min: number, max: number) {
@@ -27,12 +28,19 @@ export async function GET(request: Request) {
       throw new Error("IPO Premium history source disabled");
     }
 
-    const page = await fetchIpoPremiumIposPage({
-      status: "closed",
-      start: offset,
-      length: limit
-    });
-    const gmp = toGmpRows(page.ipos);
+    const [page, currentFeed] = await Promise.all([
+      fetchIpoPremiumIposPage({
+        status: "closed",
+        start: offset,
+        length: limit
+      }),
+      offset === 0 ? getPublicIpoFeed().catch(() => null) : Promise.resolve(null)
+    ]);
+    const historyRows = toGmpRows(page.ipos);
+    const gmp =
+      offset === 0 && currentFeed
+        ? mergeClosedHistoryRows(currentFeed.gmp, historyRows).slice(0, limit)
+        : mergeClosedHistoryRows(historyRows);
     rememberClosedIpos(gmp);
 
     return Response.json(
@@ -41,7 +49,7 @@ export async function GET(request: Request) {
         total: page.total,
         offset,
         limit,
-        nextOffset: offset + page.ipos.length,
+        nextOffset: offset + gmp.length,
         hasMore: offset + gmp.length < page.total,
         source: "IPO Premium"
       },
@@ -49,9 +57,7 @@ export async function GET(request: Request) {
     );
   } catch (premiumError) {
     try {
-      const liveRows = (await getGmpProvider().listCurrentGmp()).filter(
-        (row) => row.status !== "open" && row.status !== "upcoming"
-      );
+      const liveRows = (await getPublicIpoFeed()).gmp;
       rememberClosedIpos(liveRows);
       const fallbackRows = mergeClosedHistoryRows(liveRows, getClosedIpoBackup());
       const gmp = fallbackRows.slice(offset, offset + limit);

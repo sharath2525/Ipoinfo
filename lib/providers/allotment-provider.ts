@@ -371,16 +371,38 @@ function captchaRequired(ipo: Ipo, pan: string, checkedAt: string): AllotmentRes
   };
 }
 
+function isAllotmentResultOut(ipo: Ipo) {
+  const releaseStatus = ipo.allotmentStatusText?.trim().toLowerCase() ?? "";
+  if (/\b(?:not\s+out|pending|expected|due)\b/.test(releaseStatus)) return false;
+  if (/\bout\b/.test(releaseStatus)) return true;
+  return ipo.allotmentAvailability === "available";
+}
+
+function pendingReleaseLabel(ipo: Ipo) {
+  const releaseStatus = ipo.allotmentStatusText?.trim();
+  const allotmentDate = new Date(ipo.allotmentDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (
+    releaseStatus &&
+    /\b(?:due|expected)\s+today\b/i.test(releaseStatus) &&
+    !Number.isNaN(allotmentDate.getTime()) &&
+    allotmentDate < today
+  ) {
+    return "Awaiting registrar confirmation";
+  }
+
+  return releaseStatus || "Allotment result is pending";
+}
+
 class RealAllotmentProvider implements AllotmentProvider {
   constructor(public registrar: string) {}
 
   async check(ipo: Ipo, pan: string): Promise<AllotmentResult> {
     const checkedAt = new Date().toISOString();
     const registrar = ipo.registrar.toLowerCase();
-    const releaseStatus = ipo.allotmentStatusText?.trim();
-    const isResultOut = releaseStatus
-      ? releaseStatus.toLowerCase().includes("out")
-      : ipo.allotmentAvailability === "available";
+    const isResultOut = isAllotmentResultOut(ipo);
 
     if (!isResultOut) {
       return {
@@ -391,7 +413,7 @@ class RealAllotmentProvider implements AllotmentProvider {
         registrar: ipo.registrar,
         actionUrl: ipo.allotmentUrl,
         actionLabel: "Open status page",
-        liveStatus: releaseStatus ?? "Allotment result is pending",
+        liveStatus: pendingReleaseLabel(ipo),
         checkedAt,
         error: "Allotment result is not out yet."
       };

@@ -1,4 +1,5 @@
 import type { AllotmentAvailability, Ipo, IpoMarket, IpoStatus } from "@/lib/types";
+import { cleanIpoName, effectiveIpoStatus, ipoNameKey } from "@/lib/ipo-normalization";
 import * as cheerio from "cheerio";
 
 type IpoGuruRow = {
@@ -203,13 +204,7 @@ function ipoMarketFromName(value: string): IpoMarket {
 
 function ipoPremiumName(value: string) {
   const text = cheerio.load(value).text().replace(/\s+/g, " ").trim();
-  const name = text
-    .replace(/\s*\((?:mainboard|(?:bse|nse)\s+sme|sme)\)\s*$/i, "")
-    .replace(/\s+(?:limited|ltd\.?)\s*$/i, "")
-    .replace(/\s+ipo\s*$/i, "")
-    .trim();
-
-  return name ? `${name} IPO` : "";
+  return cleanIpoName(text);
 }
 
 function normalizeIpoPremium(row: IpoPremiumRow, fetchedAt: string): Ipo | null {
@@ -217,10 +212,16 @@ function normalizeIpoPremium(row: IpoPremiumRow, fetchedAt: string): Ipo | null 
   const name = ipoPremiumName(row.name ?? "");
   if (!name) return null;
 
-  const status = statusFrom(row.current_status ?? undefined);
   const openDate = isoDate(row.open ?? undefined);
   const closeDate = isoDate(row.close ?? undefined);
   const allotmentDate = isoDate(row.allotment_date ?? undefined);
+  const listingDate = isoDate(row.listing_date ?? undefined);
+  const status = effectiveIpoStatus({
+    status: statusFrom(row.current_status ?? undefined),
+    openDate,
+    closeDate,
+    listingDate
+  });
   const issuePriceMin = numberFrom(row.min_price);
   const issuePriceMax = numberFrom(row.max_price) || issuePriceMin;
 
@@ -235,7 +236,7 @@ function normalizeIpoPremium(row: IpoPremiumRow, fetchedAt: string): Ipo | null 
     openDate,
     closeDate,
     allotmentDate,
-    listingDate: isoDate(row.listing_date ?? undefined),
+    listingDate,
     registrar: "Registrar to confirm",
     status,
     allotmentAvailability: availabilityFrom(status, allotmentDate),
@@ -425,43 +426,12 @@ function estimateListingDate(closeDate: string) {
   return close.toISOString().slice(0, 10);
 }
 
-function addDays(value: Date, days: number) {
-  const date = new Date(value);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date;
-}
-
 function statusFromDates(openDate: string, closeDate: string): IpoStatus {
-  const now = new Date();
-  const open = new Date(openDate);
-  const close = new Date(closeDate);
-
-  if (Number.isNaN(open.getTime()) || Number.isNaN(close.getTime())) return "upcoming";
-  if (now < open) return "upcoming";
-  if (now <= addDays(close, 1)) return "open";
-  if (now <= addDays(close, 10)) return "closed";
-  return "listed";
+  return effectiveIpoStatus({ status: "upcoming", openDate, closeDate });
 }
 
 function normalizeKey(name: string) {
-  return name
-    .toLowerCase()
-    .replace(/\blimited\b/g, "")
-    .replace(/\bltd\b/g, "")
-    .replace(/\bsme\b/g, "")
-    .replace(/\bipo\b/g, "")
-    .replace(/\bindia\b/g, "")
-    .replace(/\bindian\b/g, "")
-    .replace(/\bsolution\b/g, "")
-    .replace(/\bsolutions\b/g, "")
-    .replace(/\bpvt\b/g, "")
-    .replace(/\bprivate\b/g, "")
-    .replace(/\bmainboard\b/g, "")
-    .replace(/\bbse\b/g, "")
-    .replace(/\bnse\b/g, "")
-    .replace(/\beq\b/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+  return ipoNameKey(name).replace(/\beq\b/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function isoDate(value?: string) {
@@ -532,11 +502,16 @@ function urlMatchesRegistrar(url: string, registrar: string) {
 
 function rowToIpo(row: IpoWatchParsedRow): Ipo {
   const range = yearAwareRange(row.dates);
-  const allotmentDate = estimateAllotmentDate(range.closeDate, row.status);
+  const status = effectiveIpoStatus({
+    status: row.status,
+    openDate: range.openDate,
+    closeDate: range.closeDate
+  });
+  const allotmentDate = estimateAllotmentDate(range.closeDate, status);
 
   return {
     id: slugify(`${row.name}-${range.openDate || row.section}`),
-    name: `${row.name} IPO`,
+    name: cleanIpoName(row.name),
     marketType: row.section,
     issuePriceMax: row.price,
     lotSize: 0,
@@ -545,8 +520,8 @@ function rowToIpo(row: IpoWatchParsedRow): Ipo {
     allotmentDate,
     listingDate: estimateListingDate(range.closeDate),
     registrar: "Registrar to confirm",
-    status: row.status,
-    allotmentAvailability: availabilityFrom(row.status, allotmentDate),
+    status,
+    allotmentAvailability: availabilityFrom(status, allotmentDate),
     gmp: row.gmp,
     gmpLastUpdated: row.lastUpdated,
     dataSource: "IPOWatch"
@@ -568,7 +543,7 @@ function calendarRowToIpo(cells: string[]): Ipo | null {
 
   return {
     id: slugify(`${name}-${openDate}`),
-    name: `${name} IPO`,
+    name: cleanIpoName(name),
     marketType: ipoMarketFromName(name),
     issuePriceMax,
     lotSize: 0,
@@ -986,35 +961,83 @@ function monthCalendarUrls() {
   });
 }
 
+function normalizedIpo(ipo: Ipo): Ipo {
+  const name = cleanIpoName(ipo.name);
+  const status = effectiveIpoStatus(ipo);
+
+  return {
+    ...ipo,
+    id: ipo.id || slugify(`${name}-${ipo.openDate}`),
+    name,
+    status,
+    allotmentAvailability: availabilityFrom(status, ipo.allotmentDate)
+  };
+}
+
+function dateSourceRank(source?: string) {
+  if (!source) return 0;
+  if (/IPO Guru|ipoalerts/i.test(source)) return 5;
+  if (/IPO Premium/i.test(source)) return 4;
+  if (/IPOWatch Calendar/i.test(source)) return 3;
+  if (/IPO Ji/i.test(source)) return 2;
+  return 1;
+}
+
+function preferredDate(
+  existing: Ipo,
+  incoming: Ipo,
+  field: "openDate" | "closeDate" | "allotmentDate" | "listingDate"
+) {
+  const currentValue = existing[field];
+  const incomingValue = incoming[field];
+  if (typeof incomingValue !== "string" || !incomingValue) return currentValue;
+  if (typeof currentValue !== "string" || !currentValue) return incomingValue;
+
+  return dateSourceRank(incoming.dataSource) > dateSourceRank(existing.dataSource)
+    ? incomingValue
+    : currentValue;
+}
+
+function combineIpos(existing: Ipo | undefined, incoming: Ipo) {
+  const ipo = normalizedIpo(incoming);
+  if (!existing) return ipo;
+
+  return normalizedIpo({
+    ...existing,
+    ...ipo,
+    marketType: existing.marketType ?? ipo.marketType,
+    openDate: preferredDate(existing, ipo, "openDate") || "",
+    closeDate: preferredDate(existing, ipo, "closeDate") || "",
+    allotmentDate: preferredDate(existing, ipo, "allotmentDate") || "",
+    listingDate: preferredDate(existing, ipo, "listingDate") || "",
+    issuePriceMin: existing.issuePriceMin || ipo.issuePriceMin,
+    issuePriceMax: ipo.issuePriceMax || existing.issuePriceMax || 0,
+    lotSize: existing.lotSize || ipo.lotSize || 0,
+    gmp:
+      ipo.gmpLastUpdated && typeof ipo.gmp === "number"
+        ? ipo.gmp
+        : existing.gmp,
+    gmpLastUpdated: ipo.gmpLastUpdated || existing.gmpLastUpdated,
+    allotmentAvailability:
+      existing.allotmentAvailability ?? ipo.allotmentAvailability,
+    dataSource: [existing.dataSource, ipo.dataSource]
+      .filter(Boolean)
+      .filter((source, index, sources) => sources.indexOf(source) === index)
+      .join(" + ")
+  });
+}
+
 export function mergeIpos(primary: Ipo[], secondary: Ipo[]) {
   const merged = new Map<string, Ipo>();
 
   for (const ipo of secondary) {
-    merged.set(normalizeKey(ipo.name), ipo);
+    const key = normalizeKey(ipo.name) || ipo.id;
+    merged.set(key, combineIpos(merged.get(key), ipo));
   }
 
   for (const ipo of primary) {
-    const key = normalizeKey(ipo.name);
-    const existing = merged.get(key);
-    merged.set(key, {
-      ...(existing ?? {}),
-      ...ipo,
-      marketType: existing?.marketType ?? ipo.marketType,
-      openDate: existing?.openDate || ipo.openDate || "",
-      closeDate: existing?.closeDate || ipo.closeDate || "",
-      allotmentDate: existing?.allotmentDate || ipo.allotmentDate,
-      listingDate: existing?.listingDate || ipo.listingDate,
-      issuePriceMin: existing?.issuePriceMin || ipo.issuePriceMin,
-      issuePriceMax: ipo.issuePriceMax || existing?.issuePriceMax || 0,
-      lotSize: existing?.lotSize || ipo.lotSize || 0,
-      status: ipo.status || existing?.status || "upcoming",
-      allotmentAvailability:
-        existing?.allotmentAvailability ?? ipo.allotmentAvailability,
-      dataSource: [existing?.dataSource, ipo.dataSource]
-        .filter(Boolean)
-        .filter((source, index, sources) => sources.indexOf(source) === index)
-        .join(" + ")
-    });
+    const key = normalizeKey(ipo.name) || ipo.id;
+    merged.set(key, combineIpos(merged.get(key), ipo));
   }
 
   return Array.from(merged.values());
@@ -1026,10 +1049,16 @@ function mergeAllotmentInfo(ipos: Ipo[], allotments: IpoWatchAllotmentRow[]) {
   return ipos.map((ipo) => {
     const key = normalizeKey(ipo.name);
     const direct = byName.get(key);
-    const fuzzyMatches = allotments.filter((candidate) => {
-        const candidateKey = normalizeKey(candidate.name);
-        return key.includes(candidateKey) || candidateKey.includes(key);
-      });
+    const fuzzyMatches =
+      key.length >= 5
+        ? allotments.filter((candidate) => {
+            const candidateKey = normalizeKey(candidate.name);
+            return (
+              candidateKey.length >= 5 &&
+              (key.includes(candidateKey) || candidateKey.includes(key))
+            );
+          })
+        : [];
     const row =
       [direct, ...fuzzyMatches].find((candidate) => candidate?.releaseStatus) ??
       direct ??
@@ -1037,7 +1066,14 @@ function mergeAllotmentInfo(ipos: Ipo[], allotments: IpoWatchAllotmentRow[]) {
 
     if (!row) return ipo;
 
-    const allotmentDate = isoDate(row.allotmentDate) || ipo.allotmentDate;
+    const candidateAllotmentDate = isoDate(row.allotmentDate);
+    const hasPlausibleChronology =
+      !candidateAllotmentDate ||
+      !ipo.closeDate ||
+      candidateAllotmentDate >= ipo.closeDate;
+    const allotmentDate = hasPlausibleChronology
+      ? candidateAllotmentDate || ipo.allotmentDate
+      : ipo.allotmentDate;
 
     return {
       ...ipo,
@@ -1047,7 +1083,9 @@ function mergeAllotmentInfo(ipos: Ipo[], allotments: IpoWatchAllotmentRow[]) {
       allotmentUrl: urlMatchesRegistrar(row.allotmentUrl, row.registrar)
         ? row.allotmentUrl
         : registrarUrl(row.registrar),
-      allotmentStatusText: row.releaseStatus
+      allotmentStatusText: hasPlausibleChronology
+        ? row.releaseStatus
+        : ipo.allotmentStatusText
     };
   });
 }
