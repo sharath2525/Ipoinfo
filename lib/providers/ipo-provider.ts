@@ -5,6 +5,10 @@ import {
   fetchIpoWatchIpos,
   mergeIpos
 } from "@/lib/providers/live-provider";
+import {
+  getPublicSourceHealthSnapshot,
+  observePublicSource
+} from "@/lib/providers/source-health";
 import type { Ipo, ProviderMeta } from "@/lib/types";
 
 export interface IpoDataProvider {
@@ -19,24 +23,54 @@ export class MultiSourceIpoDataProvider implements IpoDataProvider {
   ) {}
 
   getMeta(): ProviderMeta {
+    const sources = getPublicSourceHealthSnapshot();
+    const healthySources = sources.filter((source) => source.state === "healthy");
+    const hasHealthySchedule = healthySources.some((source) =>
+      /ipopremium-current|ipowatch-calendar|ipoji-current|ipoguru-api|ipoalerts-api/.test(
+        source.source
+      )
+    );
+    const hasHealthyGmp = healthySources.some((source) =>
+      /ipowatch-gmp|ipopremium-current|ipoguru-api|ipoalerts-api/.test(source.source)
+    );
+    const isLive = hasHealthySchedule && hasHealthyGmp;
+
     return {
       source: "multi-source",
-      isLive: true,
-      message: "Live IPO data merged from multiple available sources.",
-      fetchedAt: new Date().toISOString()
+      isLive,
+      dataState: isLive ? "live" : "cached",
+      message: isLive
+        ? "Live IPO data merged from multiple available sources."
+        : "Some live sources are unavailable. Verified rows were merged with saved public data.",
+      fetchedAt: new Date().toISOString(),
+      cachedAt: isLive ? undefined : new Date().toISOString()
     };
   }
 
   async listRecentIpos() {
     const sourceRequests: Array<Promise<Ipo[]>> = [
-      fetchIpoWatchIpos().catch(() => [])
+      observePublicSource(
+        "public-web-aggregate",
+        fetchIpoWatchIpos,
+        (rows) => rows.length,
+        "malformed"
+      ).catch(() => [])
     ];
 
     if (this.ipoGuruApiKey) {
-      sourceRequests.push(fetchIpoGuruIpos(this.ipoGuruApiKey).catch(() => []));
+      sourceRequests.push(
+        observePublicSource("ipoguru-api", () => fetchIpoGuruIpos(this.ipoGuruApiKey!), (rows) => rows.length)
+          .catch(() => [])
+      );
     }
     if (this.ipoAlertsApiKey) {
-      sourceRequests.push(fetchIpoAlertsIpos(this.ipoAlertsApiKey).catch(() => []));
+      sourceRequests.push(
+        observePublicSource(
+          "ipoalerts-api",
+          () => fetchIpoAlertsIpos(this.ipoAlertsApiKey!),
+          (rows) => rows.length
+        ).catch(() => [])
+      );
     }
 
     const sourceRows = await Promise.all(sourceRequests);

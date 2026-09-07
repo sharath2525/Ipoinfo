@@ -1,4 +1,8 @@
 import { getAllotmentProvider } from "@/lib/providers/allotment-provider";
+import {
+  officialAllotmentUrl,
+  withOfficialFallback
+} from "@/lib/providers/official-registrar";
 import type { AllotmentResult, BatchCheckResponse, Ipo } from "@/lib/types";
 
 async function runWithConcurrency<T>(
@@ -39,7 +43,7 @@ export async function checkAllotments(
   const results = await runWithConcurrency<AllotmentResult>(
     tasks.map(({ ipo, provider }, index) => async () => {
       try {
-        return await provider.check(ipo, panByTask[index]);
+        return withOfficialFallback(await provider.check(ipo, panByTask[index]), ipo);
       } catch {
         return {
           ipoId: ipo.id,
@@ -47,6 +51,8 @@ export async function checkAllotments(
           pan: panByTask[index],
           status: "error",
           registrar: ipo.registrar,
+          actionUrl: officialAllotmentUrl(ipo),
+          actionLabel: "Check on official registrar",
           checkedAt,
           liveStatus: "Official check failed",
           error:

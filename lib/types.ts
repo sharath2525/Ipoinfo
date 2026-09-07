@@ -74,11 +74,11 @@ export type BatchCheckResponse = {
 };
 
 export type GmpRow = Ipo & {
-  gmp: number;
-  gmpPercent: number;
-  estimatedListingPrice: number;
-  estimatedListingGain: number;
-  gmpLastUpdated: string;
+  gmp?: number;
+  gmpPercent?: number;
+  estimatedListingPrice?: number;
+  estimatedListingGain?: number;
+  gmpLastUpdated?: string;
 };
 
 export type ProviderMeta = {
@@ -86,4 +86,6 @@ export type ProviderMeta = {
   isLive: boolean;
   message: string;
   fetchedAt: string;
+  dataState?: "live" | "cached" | "unavailable";
+  cachedAt?: string;
 };

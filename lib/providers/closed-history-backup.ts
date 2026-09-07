@@ -8,6 +8,11 @@ function normalizedName(name: string) {
   return ipoNameKey(name);
 }
 
+function historyKey(row: GmpRow) {
+  const issueDate = row.openDate || row.closeDate || row.listingDate || row.id;
+  return `${normalizedName(row.name) || row.id}:${issueDate}`;
+}
+
 function timestamp(value?: string) {
   const parsed = value ? Date.parse(value) : Number.NaN;
   return Number.isNaN(parsed) ? 0 : parsed;
@@ -31,6 +36,20 @@ function mergeRow(existing: GmpRow, incoming: GmpRow): GmpRow {
     allotmentDate: primary.allotmentDate || secondary.allotmentDate,
     listingDate: primary.listingDate || secondary.listingDate,
     registrar: primary.registrar || secondary.registrar,
+    gmp: typeof primary.gmp === "number" ? primary.gmp : secondary.gmp,
+    gmpPercent:
+      typeof primary.gmpPercent === "number"
+        ? primary.gmpPercent
+        : secondary.gmpPercent,
+    estimatedListingPrice:
+      typeof primary.estimatedListingPrice === "number"
+        ? primary.estimatedListingPrice
+        : secondary.estimatedListingPrice,
+    estimatedListingGain:
+      typeof primary.estimatedListingGain === "number"
+        ? primary.estimatedListingGain
+        : secondary.estimatedListingGain,
+    gmpLastUpdated: primary.gmpLastUpdated || secondary.gmpLastUpdated,
     dataSource: [primary.dataSource, secondary.dataSource]
       .filter(Boolean)
       .filter((value, index, values) => values.indexOf(value) === index)
@@ -56,7 +75,7 @@ export function mergeClosedHistoryRows(...groups: GmpRow[][]) {
   for (const sourceRow of groups.flat()) {
     const row = normalizeRow(sourceRow);
     if (!isClosed(row)) continue;
-    const key = normalizedName(row.name) || row.id;
+    const key = historyKey(row);
     const existing = merged.get(key);
     merged.set(key, existing ? mergeRow(existing, row) : row);
   }
@@ -72,7 +91,7 @@ export function rememberClosedIpos(rows: GmpRow[]) {
   for (const sourceRow of rows) {
     const row = normalizeRow(sourceRow);
     if (!isClosed(row)) continue;
-    const key = normalizedName(row.name) || row.id;
+    const key = historyKey(row);
     const existing = memoryBackup.get(key);
     memoryBackup.set(key, existing ? mergeRow(existing, row) : row);
   }

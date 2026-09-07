@@ -49,16 +49,16 @@ export function classifyOfficialResult({
   if (signal === "not_found") {
     return {
       status: "not_applied",
-      liveStatus: "No application record found",
+      liveStatus: "Not applied",
       explanation:
-        message || "The official registrar explicitly returned no application record for this PAN and IPO.",
+        message || "The official registrar explicitly confirmed that no application exists for this PAN and IPO.",
     };
   }
 
   if (signal === "unavailable") {
     return {
       status: "unavailable",
-      liveStatus: "Could not confirm status",
+      liveStatus: "Application could not be verified",
       explanation:
         message || "The registrar did not return enough information to confirm your application. Please retry.",
     };
@@ -71,7 +71,7 @@ export function classifyOfficialResult({
   if (!hasApplicationEvidence) {
     return {
       status: "unavailable",
-      liveStatus: "Could not confirm status",
+      liveStatus: "Application could not be verified",
       explanation:
         "The registrar response was incomplete, so the app did not guess whether you applied. Please retry.",
     };
@@ -94,7 +94,11 @@ export function classifyOfficialResult({
 
 export function containsExplicitNoRecord(message: string | undefined) {
   if (!message) return false;
-  return /\b(no\s+(?:application\s+)?records?|no\s+application|application\s+(?:record\s+)?not\s+found|record\s+not\s+found)\b/i.test(
-    message,
+  const normalized = message.replace(/\s+/g, " ").trim();
+
+  // A generic "record not found" can also mean a stale issue, session or parser.
+  // Only wording tied explicitly to this PAN/application may prove Not Applied.
+  return /\b(?:no\s+application(?:\s+record)?\s+(?:exists|found)\s+for\s+(?:this\s+)?pan|application(?:\s+record)?\s+for\s+(?:this\s+)?pan\s+(?:was\s+)?not\s+found|pan\s+(?:number\s+)?(?:was\s+)?not\s+found)\b/i.test(
+    normalized
   );
 }

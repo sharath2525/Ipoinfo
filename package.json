@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "snapshot:update": "node scripts/update-public-ipo-snapshot.mjs"
   },
   "dependencies": {
     "cheerio": "^1.2.0",
