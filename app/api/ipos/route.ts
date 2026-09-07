@@ -1,28 +1,24 @@
-import { getIpoDataProvider } from "@/lib/providers/ipo-provider";
+import { getPublicIpoFeed } from "@/lib/providers/public-feed";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const provider = getIpoDataProvider();
-  const meta = provider.getMeta();
-
   try {
-    const ipos = await provider.listRecentIpos();
+    const { ipos, meta } = await getPublicIpoFeed();
     return Response.json({ ipos, meta });
-  } catch (error) {
+  } catch {
     return Response.json(
       {
         ipos: [],
         meta: {
-          ...meta,
+          source: "multi-source",
           isLive: false,
-          message:
-            error instanceof Error
-              ? `Live provider failed: ${error.message}`
-              : "Live provider failed."
+          dataState: "unavailable",
+          fetchedAt: new Date().toISOString(),
+          message: "Live IPO sources are temporarily unavailable."
         }
       },
-      { status: 502 }
+      { status: 503 }
     );
   }
 }

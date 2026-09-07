@@ -9,7 +9,7 @@ const cacheHeaders = {
 export async function GET() {
   try {
     return Response.json(await getPublicIpoFeed(), { headers: cacheHeaders });
-  } catch (error) {
+  } catch {
     return Response.json(
       {
         ipos: [],
@@ -17,14 +17,12 @@ export async function GET() {
         meta: {
           source: "multi-source",
           isLive: false,
+          dataState: "unavailable",
           fetchedAt: new Date().toISOString(),
-          message:
-            error instanceof Error
-              ? `Live providers failed: ${error.message}`
-              : "Live providers failed."
+          message: "Live IPO sources are temporarily unavailable."
         }
       },
-      { status: 502 }
+      { status: 503 }
     );
   }
 }

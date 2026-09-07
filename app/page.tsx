@@ -1,35 +1,46 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import closedIpoSeed from "@/data/closed-ipo-backup.json";
-import { cleanIpoName, effectiveIpoStatus, ipoNameKey } from "@/lib/ipo-normalization";
+import currentIpoSeed from "@/data/current-ipo-backup.json";
+import ipoSnapshotMeta from "@/data/ipo-snapshot-meta.json";
+import { refreshedCaptchaState } from "@/lib/captcha-state";
+import {
+  gmpTimingLabel,
+  paginationWindow,
+  parseGmpViewHash,
+  serializeGmpViewHash,
+  sortAndFilterGmpRows,
+  type GmpMarketFilter,
+  type GmpSort
+} from "@/lib/gmp-view";
+import {
+  cleanIpoName,
+  effectiveIpoStatus,
+  indiaDate,
+  ipoNameKey,
+  sanitizeIpoDates
+} from "@/lib/ipo-normalization";
 import { isValidPan, normalizePan } from "@/lib/pan";
+import { officialAllotmentUrl } from "@/lib/providers/official-registrar";
 import type { AllotmentResult, BatchCheckResponse, GmpRow, Ipo } from "@/lib/types";
 
 const gmpFilters = ["open", "upcoming", "closed"] as const;
-const gmpViewModes = [
-  "mainboard_first",
-  "sme_first",
-  "mainboard_only",
-  "sme_only",
-  "date_priority"
-] as const;
 const closedPageSizes = [25, 50, 100] as const;
 const REMEMBERED_PAN_KEY = "ipo-fast-check:remembered-pan";
-const PUBLIC_FEED_CACHE_KEY = "ipo-fast-check:public-feed-v5";
-const PREVIOUS_PUBLIC_FEED_CACHE_KEYS = [
-  "ipo-fast-check:public-feed-v4",
-  "ipo-fast-check:public-feed-v3",
-  "ipo-fast-check:public-feed-v2",
-  "ipo-fast-check:public-feed-v1"
-] as const;
-const PUBLIC_FEED_CACHE_MAX_AGE = 6 * 60 * 60 * 1000;
+const PUBLIC_FEED_CACHE_KEY = "ipo-fast-check:public-feed-v7";
 const PUBLIC_FEED_REFRESH_INTERVAL = 60 * 1000;
 const PUBLIC_FEED_RETRY_INTERVAL = 15 * 1000;
 
 type PublicFeed = {
   ipos: Ipo[];
   gmp: GmpRow[];
+  meta?: {
+    isLive: boolean;
+    dataState?: "live" | "cached" | "unavailable";
+    fetchedAt?: string;
+    cachedAt?: string;
+    message?: string;
+  };
 };
 
 type StoredPublicFeed = PublicFeed & {
@@ -42,6 +53,11 @@ type CaptchaState = {
   answer: string;
   loading?: boolean;
   error?: string;
+};
+
+type FeedDisplayState = {
+  state: "live" | "cached" | "unavailable";
+  updatedAt?: string;
 };
 
 function rupee(value: number) {
@@ -93,6 +109,11 @@ function dateLabel(value?: string) {
   }).format(date);
 }
 
+function maskPan(value: string) {
+  const pan = normalizePan(value);
+  return isValidPan(pan) ? `${pan.slice(0, 5)}****${pan.slice(-1)}` : "";
+}
+
 function allotmentReleaseLabel(ipo: Ipo) {
   const sourceLabel = ipo.allotmentStatusText?.trim();
   const allotmentDate = parseDate(ipo.allotmentDate);
@@ -137,9 +158,9 @@ function statusTone(value: string) {
   }
 
   if (value === "not_allotted") return "bad";
+  if (value === "unavailable" || value === "error") return "neutral";
   if (
     value === "not_applied" ||
-    value === "unavailable" ||
     value === "pending" ||
     value === "expected_soon" ||
     value === "captcha_required"
@@ -147,6 +168,15 @@ function statusTone(value: string) {
     return "warn";
   }
   return "warn";
+}
+
+function statusSymbol(value: string) {
+  if (value === "allotted" || value === "available" || value === "allotment_out") {
+    return "\u2713";
+  }
+  if (value === "not_allotted") return "\u00d7";
+  if (value === "unavailable" || value === "error") return "?";
+  return "!";
 }
 
 function hasResultFacts(result: AllotmentResult) {
@@ -176,17 +206,20 @@ function normalizedIpoName(value: string) {
 
 function normalizeIposForDisplay(rows: Ipo[]) {
   const unique = new Map<string, Ipo>();
+  const keyById = new Map<string, string>();
 
   for (const sourceRow of rows) {
-    const row = {
+    const row = sanitizeIpoDates({
       ...sourceRow,
       name: cleanIpoName(sourceRow.name),
       status: effectiveIpoStatus(sourceRow)
-    };
-    const key = normalizedIpoName(row.name) || row.id;
+    });
+    const nameKey = normalizedIpoName(row.name) || row.id;
+    const key = keyById.get(row.id) ?? nameKey;
     const existing = unique.get(key);
 
     unique.set(key, existing ? { ...existing, ...row, id: existing.id || row.id } : row);
+    keyById.set(row.id, key);
   }
 
   return [...unique.values()];
@@ -194,17 +227,20 @@ function normalizeIposForDisplay(rows: Ipo[]) {
 
 function normalizeGmpRowsForDisplay(rows: GmpRow[]) {
   const unique = new Map<string, GmpRow>();
+  const keyById = new Map<string, string>();
 
   for (const sourceRow of rows) {
-    const row = {
+    const row = sanitizeIpoDates({
       ...sourceRow,
       name: cleanIpoName(sourceRow.name),
       status: effectiveIpoStatus(sourceRow)
-    };
-    const key = normalizedIpoName(row.name) || row.id;
+    });
+    const nameKey = normalizedIpoName(row.name) || row.id;
+    const key = keyById.get(row.id) ?? nameKey;
     const existing = unique.get(key);
     if (!existing) {
       unique.set(key, row);
+      keyById.set(row.id, key);
       continue;
     }
 
@@ -223,24 +259,26 @@ function normalizeGmpRowsForDisplay(rows: GmpRow[]) {
       openDate: primary.openDate || secondary.openDate,
       closeDate: primary.closeDate || secondary.closeDate,
       allotmentDate: primary.allotmentDate || secondary.allotmentDate,
-      listingDate: primary.listingDate || secondary.listingDate
+      listingDate: primary.listingDate || secondary.listingDate,
+      gmp: typeof primary.gmp === "number" ? primary.gmp : secondary.gmp,
+      gmpPercent:
+        typeof primary.gmpPercent === "number"
+          ? primary.gmpPercent
+          : secondary.gmpPercent,
+      estimatedListingPrice:
+        typeof primary.estimatedListingPrice === "number"
+          ? primary.estimatedListingPrice
+          : secondary.estimatedListingPrice,
+      estimatedListingGain:
+        typeof primary.estimatedListingGain === "number"
+          ? primary.estimatedListingGain
+          : secondary.estimatedListingGain,
+      gmpLastUpdated: primary.gmpLastUpdated || secondary.gmpLastUpdated
     });
+    keyById.set(row.id, key);
   }
 
   return [...unique.values()];
-}
-
-function sortGmpRows(rows: GmpRow[]) {
-  return [...rows].sort((first, second) => {
-    if (first.status === "upcoming") {
-      return dateTime(first.openDate) - dateTime(second.openDate);
-    }
-
-    return (
-      dateTime(second.closeDate) - dateTime(first.closeDate) ||
-      dateTime(second.listingDate) - dateTime(first.listingDate)
-    );
-  });
 }
 
 function gmpGroup(row: GmpRow): "open" | "upcoming" | "closed" {
@@ -248,43 +286,6 @@ function gmpGroup(row: GmpRow): "open" | "upcoming" | "closed" {
   if (status === "open") return "open";
   if (status === "upcoming") return "upcoming";
   return "closed";
-}
-
-function gmpViewModeLabel(
-  mode: (typeof gmpViewModes)[number],
-  filter: "open" | "upcoming" | "closed"
-) {
-  if (mode === "mainboard_first") return "Mainboard first";
-  if (mode === "sme_first") return "SME first";
-  if (mode === "mainboard_only") return "Mainboard only";
-  if (mode === "sme_only") return "SME only";
-  return filter === "upcoming" ? "Opening soon" : "Closing soon";
-}
-
-function sortCurrentGmpRows(
-  rows: GmpRow[],
-  filter: "open" | "upcoming",
-  mode: (typeof gmpViewModes)[number]
-) {
-  const relevantTime = (row: GmpRow) =>
-    dateTime(filter === "upcoming" ? row.openDate : row.closeDate);
-  const byRelevantDate = (first: GmpRow, second: GmpRow) =>
-    relevantTime(first) - relevantTime(second) || first.name.localeCompare(second.name);
-
-  if (mode === "mainboard_only") {
-    return rows.filter((row) => row.marketType !== "SME").sort(byRelevantDate);
-  }
-  if (mode === "sme_only") {
-    return rows.filter((row) => row.marketType === "SME").sort(byRelevantDate);
-  }
-  if (mode === "date_priority") return [...rows].sort(byRelevantDate);
-
-  const preferredMarket = mode === "sme_first" ? "SME" : "Mainboard";
-  return [...rows].sort((first, second) => {
-    const firstMarket = (first.marketType ?? "Mainboard") === preferredMarket ? 0 : 1;
-    const secondMarket = (second.marketType ?? "Mainboard") === preferredMarket ? 0 : 1;
-    return firstMarket - secondMarket || byRelevantDate(first, second);
-  });
 }
 
 function isCompletedIpo(ipo: Ipo) {
@@ -322,45 +323,47 @@ function recentResultsFirst(ipos: Ipo[]) {
   });
 }
 
-function paginationWindow(currentPage: number, totalPages: number) {
-  const visibleCount = Math.min(3, totalPages);
-  const start = Math.max(1, Math.min(currentPage - 1, totalPages - visibleCount + 1));
-  return Array.from({ length: visibleCount }, (_, index) => start + index);
-}
-
 const bundledAllotmentIpos = recentResultsFirst(
-  (closedIpoSeed as Ipo[]).filter(isLastOrThisMonthResult)
+  (currentIpoSeed as Ipo[]).filter(isLastOrThisMonthResult)
 );
+
+const bundledGmpRows = normalizeGmpRowsForDisplay(currentIpoSeed as GmpRow[]);
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<"allotment" | "gmp">("allotment");
   const [ipos, setIpos] = useState<Ipo[]>(bundledAllotmentIpos);
-  const [gmpRows, setGmpRows] = useState<GmpRow[]>([]);
+  const [gmpRows, setGmpRows] = useState<GmpRow[]>(bundledGmpRows);
   const [selectedIpoId, setSelectedIpoId] = useState(
     bundledAllotmentIpos[0]?.id ?? ""
   );
   const [panInput, setPanInput] = useState("");
   const [panError, setPanError] = useState("");
   const [rememberPan, setRememberPan] = useState(false);
-  const [restoredPan, setRestoredPan] = useState(false);
+  const [savedPan, setSavedPan] = useState("");
   const [panCopied, setPanCopied] = useState(false);
-  const [loadError, setLoadError] = useState("");
   const [feedLoading, setFeedLoading] = useState(true);
+  const [feedState, setFeedState] = useState<FeedDisplayState>({ state: "live" });
   const [checkError, setCheckError] = useState("");
   const [checking, setChecking] = useState(false);
   const [results, setResults] = useState<BatchCheckResponse | null>(null);
   const [captchas, setCaptchas] = useState<Record<string, CaptchaState>>({});
   const [gmpSearch, setGmpSearch] = useState("");
   const [gmpFilter, setGmpFilter] = useState<(typeof gmpFilters)[number]>("open");
-  const [gmpViewModeIndex, setGmpViewModeIndex] = useState(0);
+  const [gmpMarket, setGmpMarket] = useState<GmpMarketFilter>("all");
+  const [gmpSort, setGmpSort] = useState<GmpSort>("date");
+  const [filterSheetOpen, setFilterSheetOpen] = useState(false);
   const [closedGmpRows, setClosedGmpRows] = useState<GmpRow[]>([]);
-  const [closedTotal, setClosedTotal] = useState(0);
+  const [closedTotal, setClosedTotal] = useState(
+    Number(ipoSnapshotMeta.closed) || 0
+  );
   const [closedPage, setClosedPage] = useState(1);
   const [closedPageSize, setClosedPageSize] = useState<(typeof closedPageSizes)[number]>(25);
   const [closedLoaded, setClosedLoaded] = useState(false);
   const [closedLoading, setClosedLoading] = useState(false);
   const [closedError, setClosedError] = useState("");
+  const [closedFeedState, setClosedFeedState] = useState<FeedDisplayState>({ state: "live" });
   const closedRequestId = useRef(0);
+  const closedCountRequested = useRef(false);
   const gmpResultsTop = useRef<HTMLDivElement>(null);
   const ipoSelectElement = useRef<HTMLSelectElement>(null);
   const panInputElement = useRef<HTMLInputElement>(null);
@@ -376,18 +379,18 @@ export default function Home() {
 
   useEffect(() => {
     const restoreViewFromHash = () => {
-      const hash = window.location.hash.toLowerCase();
-      if (!hash.startsWith("#gmp")) {
+      const restored = parseGmpViewHash(window.location.hash);
+      if (!restored) {
         setActiveTab("allotment");
         return;
       }
 
       setActiveTab("gmp");
-      const restoredFilter = gmpFilters.find((filter) => hash === `#gmp-${filter}`);
-      if (restoredFilter) {
-        setGmpFilter(restoredFilter);
-        setClosedPage(1);
-      }
+      setGmpFilter(restored.category);
+      setGmpMarket(restored.category === "closed" ? "all" : restored.market);
+      setGmpSort(restored.category === "closed" ? "date" : restored.sort);
+      setClosedPage(restored.page);
+      setClosedPageSize(restored.pageSize);
     };
 
     restoreViewFromHash();
@@ -399,9 +402,7 @@ export default function Home() {
     try {
       const savedPan = normalizePan(localStorage.getItem(REMEMBERED_PAN_KEY) ?? "");
       if (isValidPan(savedPan)) {
-        setPanInput(savedPan);
-        setRememberPan(true);
-        setRestoredPan(true);
+        setSavedPan(savedPan);
       }
     } catch {
       // Browser storage can be unavailable in private or restricted modes.
@@ -418,12 +419,32 @@ export default function Home() {
     let stopped = false;
     let requestInFlight = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let latestIpos = normalizeIposForDisplay(bundledAllotmentIpos);
+    let latestGmp: GmpRow[] = bundledGmpRows;
 
-    function applyPublicFeed(data: PublicFeed) {
+    function applyPublicFeed(
+      data: PublicFeed,
+      origin: "network" | "browser-cache" = "network",
+      browserCachedAt?: number
+    ) {
       if (!Array.isArray(data.ipos) || !Array.isArray(data.gmp)) return;
 
-      const normalizedIpos = normalizeIposForDisplay(data.ipos);
-      const normalizedGmp = normalizeGmpRowsForDisplay(data.gmp);
+      let normalizedIpos = normalizeIposForDisplay(data.ipos);
+      let normalizedGmp = normalizeGmpRowsForDisplay(data.gmp);
+      const state =
+        origin === "browser-cache" ? "cached" : (data.meta?.dataState ?? "live");
+
+      if (origin === "network" && state !== "live") {
+        normalizedIpos = normalizeIposForDisplay([...latestIpos, ...normalizedIpos]);
+        const presentGroups = new Set(normalizedGmp.map(gmpGroup));
+        normalizedGmp = normalizeGmpRowsForDisplay([
+          ...latestGmp.filter((row) => !presentGroups.has(gmpGroup(row))),
+          ...normalizedGmp
+        ]);
+      }
+
+      if (normalizedIpos.length) latestIpos = normalizedIpos;
+      if (normalizedGmp.length) latestGmp = normalizedGmp;
 
       if (normalizedIpos.length) {
         const allotmentChoices = recentResultsFirst(
@@ -442,27 +463,27 @@ export default function Home() {
         selectedIpoName.current = nextChoice?.name ?? "";
       }
       if (normalizedGmp.length) setGmpRows(normalizedGmp);
-      setLoadError("");
+      const updatedAt =
+        data.meta?.cachedAt ??
+        data.meta?.fetchedAt ??
+        (browserCachedAt ? new Date(browserCachedAt).toISOString() : undefined);
+      setFeedState({ state, updatedAt });
       setFeedLoading(false);
       hasUsableGmp = normalizedGmp.length > 0 || hasUsableGmp;
     }
 
     let hasUsableGmp = false;
     function loadCachedFeed() {
-      for (const cacheKey of [
-        PUBLIC_FEED_CACHE_KEY,
-        ...PREVIOUS_PUBLIC_FEED_CACHE_KEYS
-      ]) {
+      for (const cacheKey of [PUBLIC_FEED_CACHE_KEY]) {
         try {
           const stored = JSON.parse(
             localStorage.getItem(cacheKey) ?? "null"
           ) as StoredPublicFeed | null;
           if (
             stored &&
-            Number.isFinite(stored.cachedAt) &&
-            Date.now() - stored.cachedAt <= PUBLIC_FEED_CACHE_MAX_AGE
+            Number.isFinite(stored.cachedAt)
           ) {
-            applyPublicFeed(stored);
+            applyPublicFeed(stored, "browser-cache", stored.cachedAt);
             break;
           }
         } catch {
@@ -494,22 +515,23 @@ export default function Home() {
           retryTimer = null;
         }
         try {
+          const successfulAt =
+            data.meta?.dataState === "cached"
+              ? new Date(data.meta.cachedAt ?? data.meta.fetchedAt ?? Date.now()).getTime()
+              : Date.now();
           localStorage.setItem(
             PUBLIC_FEED_CACHE_KEY,
-            JSON.stringify({ ...data, cachedAt: Date.now() } satisfies StoredPublicFeed)
+            JSON.stringify({ ...data, cachedAt: successfulAt } satisfies StoredPublicFeed)
           );
         } catch {
           // Public-feed caching is an optional speed enhancement.
         }
-      } catch (error) {
+      } catch {
         if (stopped) return;
-        setLoadError(
-          hasUsableGmp
-            ? "Live data refresh is retrying automatically. Showing the last successful update."
-            : error instanceof Error
-              ? `${error.message} Retrying automatically...`
-              : "Could not load IPO data. Retrying automatically..."
-        );
+        setFeedState((current) => ({
+          state: hasUsableGmp ? "cached" : "unavailable",
+          updatedAt: current.updatedAt
+        }));
         if (!hasUsableGmp && !retryTimer) {
           retryTimer = setTimeout(() => {
             retryTimer = null;
@@ -541,10 +563,26 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === "gmp" && gmpFilter === "closed") {
+    if (activeTab !== "gmp") return;
+    if (gmpFilter === "closed") {
       void loadClosedHistory(closedPage, closedPageSize);
+      return;
     }
+    if (!closedCountRequested.current) void loadClosedCount();
   }, [activeTab, closedPage, closedPageSize, gmpFilter]);
+
+  useEffect(() => {
+    if (!filterSheetOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFilterSheetOpen(false);
+    };
+    document.body.classList.add("modal-open");
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.classList.remove("modal-open");
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [filterSheetOpen]);
 
   const filteredGmp = useMemo(() => {
     const sourceRows = normalizeGmpRowsForDisplay(
@@ -558,13 +596,20 @@ export default function Home() {
       return matchesFilter && matchesSearch;
     });
 
-    if (gmpFilter === "closed") return sortGmpRows(matchingRows);
-    return sortCurrentGmpRows(
+    return sortAndFilterGmpRows(
       matchingRows,
       gmpFilter,
-      gmpViewModes[gmpViewModeIndex]
+      gmpFilter === "closed" ? "all" : gmpMarket,
+      gmpFilter === "closed" ? "date" : gmpSort
     );
-  }, [closedGmpRows, gmpFilter, gmpRows, gmpSearch, gmpViewModeIndex]);
+  }, [closedGmpRows, gmpFilter, gmpMarket, gmpRows, gmpSearch, gmpSort]);
+
+  const gmpCounts = useMemo(() => {
+    const counts = { open: 0, upcoming: 0, closed: 0 };
+    for (const row of normalizeGmpRowsForDisplay(gmpRows)) counts[gmpGroup(row)] += 1;
+    counts.closed = Math.max(counts.closed, closedTotal);
+    return counts;
+  }, [closedTotal, gmpRows]);
 
   const selectedIpo = ipos.find((ipo) => ipo.id === selectedIpoId);
   const allotmentIpos = useMemo(
@@ -578,6 +623,9 @@ export default function Home() {
   const closedPageNumbers = paginationWindow(closedPage, closedTotalPages);
   const closedRangeStart = closedTotal ? (closedPage - 1) * closedPageSize + 1 : 0;
   const closedRangeEnd = Math.min(closedPage * closedPageSize, closedTotal);
+  const showGmpSkeleton =
+    !filteredGmp.length &&
+    (gmpFilter === "closed" ? closedLoading : feedLoading);
 
   useEffect(() => {
     if (!hasEnteredCaptcha) return;
@@ -595,8 +643,27 @@ export default function Home() {
     return `${result.ipoId}:${result.pan}`;
   }
 
-  function updateViewHash(tab: "allotment" | "gmp", filter = gmpFilter) {
-    const hash = tab === "allotment" ? "#allotment" : `#gmp-${filter}`;
+  function updateViewHash(
+    tab: "allotment" | "gmp",
+    overrides: Partial<{
+      category: (typeof gmpFilters)[number];
+      market: GmpMarketFilter;
+      sort: GmpSort;
+      page: number;
+      pageSize: 25 | 50 | 100;
+    }> = {}
+  ) {
+    const category = overrides.category ?? gmpFilter;
+    const hash =
+      tab === "allotment"
+        ? "#allotment"
+        : serializeGmpViewHash({
+            category,
+            market: category === "closed" ? "all" : overrides.market ?? gmpMarket,
+            sort: category === "closed" ? "date" : overrides.sort ?? gmpSort,
+            page: category === "closed" ? overrides.page ?? closedPage : 1,
+            pageSize: overrides.pageSize ?? closedPageSize
+          });
     window.history.replaceState(
       null,
       "",
@@ -612,7 +679,21 @@ export default function Home() {
   function selectGmpFilter(filter: (typeof gmpFilters)[number]) {
     setGmpFilter(filter);
     setClosedPage(1);
-    updateViewHash("gmp", filter);
+    if (filter === "closed") {
+      setGmpMarket("all");
+      setGmpSort("date");
+    }
+    updateViewHash("gmp", { category: filter, page: 1 });
+  }
+
+  function updateGmpMarket(market: GmpMarketFilter) {
+    setGmpMarket(market);
+    updateViewHash("gmp", { market });
+  }
+
+  function updateGmpSort(sort: GmpSort) {
+    setGmpSort(sort);
+    updateViewHash("gmp", { sort });
   }
 
   function replaceResult(nextResult: AllotmentResult) {
@@ -680,40 +761,105 @@ export default function Home() {
     }, 100);
   }
 
+  async function loadClosedCount() {
+    closedCountRequested.current = true;
+    try {
+      const response = await fetch("/api/gmp/history?offset=0&limit=1", {
+        cache: "no-store"
+      });
+      const data = (await response.json()) as { total?: number };
+      if (response.ok && typeof data.total === "number") setClosedTotal(data.total);
+
+      void fetch("/api/gmp/history?offset=0&limit=1&refresh=1", {
+        cache: "no-store"
+      })
+        .then(async (liveResponse) => {
+          const liveData = (await liveResponse.json()) as { total?: number };
+          if (liveResponse.ok && typeof liveData.total === "number") {
+            setClosedTotal(liveData.total);
+          }
+        })
+        .catch(() => undefined);
+    } catch {
+      closedCountRequested.current = false;
+    }
+  }
+
   async function loadClosedHistory(page: number, pageSize: number) {
     const requestId = ++closedRequestId.current;
     setClosedLoading(true);
     setClosedLoaded(false);
     setClosedError("");
-    setClosedGmpRows([]);
     const offset = (page - 1) * pageSize;
 
-    try {
-      const response = await fetch(`/api/gmp/history?offset=${offset}&limit=${pageSize}`, {
-        cache: "no-store"
-      });
+    async function requestHistory(refresh = false) {
+      const response = await fetch(
+        `/api/gmp/history?offset=${offset}&limit=${pageSize}${refresh ? "&refresh=1" : ""}`,
+        { cache: "no-store" }
+      );
       const data = (await response.json()) as {
         gmp?: GmpRow[];
         total?: number;
         error?: string;
+        dataState?: "live" | "cached" | "unavailable";
+        fetchedAt?: string;
+        cachedAt?: string;
       };
 
       if (!response.ok) {
         throw new Error(data.error ?? "Closed IPO history is temporarily unavailable.");
       }
 
+      return data;
+    }
+
+    function applyHistory(data: Awaited<ReturnType<typeof requestHistory>>) {
       if (requestId !== closedRequestId.current) return;
 
-      setClosedGmpRows(sortGmpRows(normalizeGmpRowsForDisplay(data.gmp ?? [])));
-      setClosedTotal(data.total ?? 0);
+      const total = data.total ?? 0;
+      const lastPage = Math.max(1, Math.ceil(total / pageSize));
+      if (page > lastPage) {
+        setClosedTotal(total);
+        setClosedPage(lastPage);
+        updateViewHash("gmp", { page: lastPage });
+        return;
+      }
+
+      setClosedGmpRows(
+        sortAndFilterGmpRows(
+          normalizeGmpRowsForDisplay(data.gmp ?? []),
+          "closed",
+          "all",
+          "date"
+        )
+      );
+      setClosedTotal(total);
       setClosedLoaded(true);
+      setClosedFeedState({
+        state: data.dataState ?? "live",
+        updatedAt: data.cachedAt ?? data.fetchedAt
+      });
       if (page > 1) {
         requestAnimationFrame(() => {
           gmpResultsTop.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         });
       }
+    }
+
+    try {
+      const cachedData = await requestHistory();
+      applyHistory(cachedData);
+      if (requestId === closedRequestId.current) setClosedLoading(false);
+
+      try {
+        const liveData = await requestHistory(true);
+        applyHistory(liveData);
+      } catch {
+        // The saved page remains visible when the live source is unavailable.
+      }
     } catch (error) {
       if (requestId !== closedRequestId.current) return;
+      setClosedFeedState((current) => ({ ...current, state: "unavailable" }));
       setClosedError(
         error instanceof Error ? error.message : "Closed IPO history is temporarily unavailable."
       );
@@ -760,7 +906,6 @@ export default function Home() {
     activeCheckKey.current = checkKey;
 
     setPanInput(pan);
-    setRestoredPan(false);
     setResults(null);
     setCaptchas({});
     setChecking(true);
@@ -798,6 +943,7 @@ export default function Home() {
       if (rememberPan) {
         try {
           localStorage.setItem(REMEMBERED_PAN_KEY, pan);
+          setSavedPan(pan);
         } catch {
           // Remembering PAN is optional and may be blocked by the browser.
         }
@@ -823,7 +969,6 @@ export default function Home() {
     setPanInput(pan);
     setPanError("");
     setPanCopied(false);
-    setRestoredPan(false);
     setResults(null);
     setCaptchas({});
     lastCheckKey.current = "";
@@ -833,7 +978,7 @@ export default function Home() {
   function updateRememberPan(enabled: boolean) {
     setRememberPan(enabled);
     if (!enabled) {
-      setRestoredPan(false);
+      setSavedPan("");
       try {
         localStorage.removeItem(REMEMBERED_PAN_KEY);
       } catch {
@@ -841,10 +986,29 @@ export default function Home() {
       }
     } else if (isValidPan(panInput)) {
       try {
-        localStorage.setItem(REMEMBERED_PAN_KEY, normalizePan(panInput));
+        const pan = normalizePan(panInput);
+        localStorage.setItem(REMEMBERED_PAN_KEY, pan);
+        setSavedPan(pan);
       } catch {
         // The browser may block local storage.
       }
+    }
+  }
+
+  function useSavedPan() {
+    if (!isValidPan(savedPan)) return;
+    lastCheckKey.current = "";
+    updatePan(savedPan);
+    requestAnimationFrame(() => panInputElement.current?.focus());
+  }
+
+  function forgetSavedPan() {
+    setRememberPan(false);
+    setSavedPan("");
+    try {
+      localStorage.removeItem(REMEMBERED_PAN_KEY);
+    } catch {
+      // The browser may block local storage.
     }
   }
 
@@ -892,13 +1056,10 @@ export default function Home() {
 
       setCaptchas((current) => ({
         ...current,
-        [key]: {
-          token: data.token,
-          image: data.image,
-          answer: "",
-          loading: false,
-          error: notice
-        }
+        [key]: refreshedCaptchaState(
+          { token: data.token, image: data.image },
+          notice
+        )
       }));
     } catch (error) {
       if (controller.signal.aborted || requestId !== captchaRequestId.current) return;
@@ -1037,7 +1198,17 @@ export default function Home() {
                     <h3>Select IPO</h3>
                   </div>
 
-                  {loadError ? <p className="error-text">{loadError}</p> : null}
+                  {feedState.state === "cached" ? (
+                    <div className="feed-state cached compact-feed-state" role="status">
+                      <strong>Cached IPO list</strong>
+                      <span>Updated {timeLabel(feedState.updatedAt)}</span>
+                    </div>
+                  ) : feedState.state === "unavailable" ? (
+                    <div className="feed-state unavailable compact-feed-state" role="status">
+                      <strong>Live IPO list temporarily unavailable</strong>
+                      <span>Showing saved recent IPOs while refresh retries.</span>
+                    </div>
+                  ) : null}
 
                   <div className="selector-block">
                     <select
@@ -1137,20 +1308,22 @@ export default function Home() {
                       />
                       Remember PAN on this device
                     </label>
-                    {restoredPan ? (
-                      <button
-                        className="text-command"
-                        onClick={() => {
-                          lastCheckKey.current = "";
-                          scheduleAutoCheck(panInput, selectedIpoId);
-                          setRestoredPan(false);
-                        }}
-                        type="button"
-                      >
-                        Re-check saved PAN
-                      </button>
-                    ) : null}
                   </div>
+                  {savedPan ? (
+                    <div className="saved-pan-row">
+                      <span>
+                        Saved PAN <strong>{maskPan(savedPan)}</strong>
+                      </span>
+                      <div>
+                        <button className="text-command" onClick={useSavedPan} type="button">
+                          Use saved PAN
+                        </button>
+                        <button className="text-command danger-command" onClick={forgetSavedPan} type="button">
+                          Forget
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="actions">
@@ -1172,7 +1345,21 @@ export default function Home() {
                       : "Sent securely to the official registrar for this check. Never stored on our server."}
                   </span>
                 </div>
-                {checkError ? <p className="error-text">{checkError}</p> : null}
+                {checkError ? (
+                  <div className="request-error-box">
+                    <p className="error-text">{checkError}</p>
+                    {selectedIpo ? (
+                      <a
+                        className="result-link"
+                        href={officialAllotmentUrl(selectedIpo)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Check on official registrar
+                      </a>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -1199,13 +1386,16 @@ export default function Home() {
                         <p>Data sourced from {currentResult.registrar}</p>
                       </div>
                       <span className={`status-pill ${statusTone(currentResult.status)}`}>
+                        <span className="status-icon" aria-hidden="true">
+                          {statusSymbol(currentResult.status)}
+                        </span>
                         {statusLabel(currentResult.status)}
                       </span>
                     </div>
 
                     {currentResult.status === "allotted" ? (
                       <div className="allotted-celebration">
-                        <span className="result-check" aria-hidden="true">✓</span>
+                        <span className="result-check" aria-hidden="true">&#10003;</span>
                         <div>
                           <strong>Congratulations!</strong>
                           <span>Your application received an allotment.</span>
@@ -1257,12 +1447,24 @@ export default function Home() {
                     currentResult.registrar.toLowerCase().includes("bigshare") ? (
                       <div className="captcha-box large">
                         {currentCaptcha?.image ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            alt="Bigshare CAPTCHA"
-                            className="captcha-image"
-                            src={currentCaptcha.image}
-                          />
+                          <div className="captcha-visual">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              alt="Bigshare CAPTCHA"
+                              className="captcha-image"
+                              src={currentCaptcha.image}
+                            />
+                            <button
+                              aria-label="Refresh CAPTCHA"
+                              className="captcha-refresh"
+                              disabled={currentCaptcha.loading}
+                              onClick={() => loadCaptcha(currentResult)}
+                              title="Refresh CAPTCHA"
+                              type="button"
+                            >
+                              <span aria-hidden="true">&#8635;</span>
+                            </button>
+                          </div>
                         ) : null}
                         {currentCaptcha?.image ? (
                           <div className="captcha-row">
@@ -1305,32 +1507,24 @@ export default function Home() {
                             Load Bigshare CAPTCHA
                           </button>
                         )}
-                        {currentCaptcha?.image ? (
-                          <button
-                            className="ghost compact-button"
-                            disabled={currentCaptcha.loading}
-                            onClick={() => loadCaptcha(currentResult)}
-                            type="button"
-                          >
-                            Refresh CAPTCHA
-                          </button>
-                        ) : null}
                         {currentCaptcha?.error ? (
                           <span className="captcha-error">{currentCaptcha.error}</span>
                         ) : null}
                       </div>
-                    ) : currentResult.actionUrl ? (
+                    ) : !currentResult.actionUrl && !currentResult.error ? (
+                      <p className="small-note">Check complete.</p>
+                    ) : null}
+
+                    {currentResult.actionUrl ? (
                       <a
                         className="result-link"
                         href={currentResult.actionUrl}
                         target="_blank"
                         rel="noreferrer"
                       >
-                        {currentResult.actionLabel || `Open ${currentResult.registrar}`}
+                        Check on official registrar
                       </a>
-                    ) : currentResult.error ? null : (
-                      <p className="small-note">Check complete.</p>
-                    )}
+                    ) : null}
 
                     <button
                       className={`secondary result-reset${
@@ -1356,7 +1550,7 @@ export default function Home() {
           <section className="panel" aria-label="IPO GMP">
             <div className="panel-header">
               <p className="eyebrow">GMP</p>
-              <h2>Current IPO GMP</h2>
+              <h2>Latest available GMP</h2>
             </div>
             <div className="panel-body">
               <div className="gmp-tools">
@@ -1375,52 +1569,174 @@ export default function Home() {
                       onClick={() => selectGmpFilter(filter)}
                       type="button"
                     >
-                      {statusLabel(filter)}
+                      <span>{statusLabel(filter)}</span>
+                      <span className="filter-count">
+                        {gmpCounts[filter].toLocaleString("en-IN")}
+                      </span>
                     </button>
                   ))}
                 </div>
               </div>
 
               {gmpFilter !== "closed" ? (
-                <div className="gmp-view-stepper" aria-label="IPO market and date order">
+                <div className="gmp-sort-row">
                   <button
-                    className="gmp-view-arrow"
-                    disabled={gmpViewModeIndex === 0}
-                    onClick={() =>
-                      setGmpViewModeIndex((index) => Math.max(0, index - 1))
-                    }
-                    title="Previous order"
+                    className="gmp-sort-trigger"
+                    onClick={() => setFilterSheetOpen(true)}
                     type="button"
-                    aria-label="Previous IPO order"
+                    aria-haspopup="dialog"
                   >
-                    &#8592;
+                    <span aria-hidden="true">&#9776;</span>
+                    <span>Sort &amp; Filter</span>
+                    <small>
+                      {gmpMarket === "all"
+                        ? gmpSort === "date"
+                          ? gmpFilter === "open"
+                            ? "Closing soon"
+                            : "Opening soon"
+                          : gmpSort === "mainboard_first"
+                            ? "Mainboard first"
+                            : "SME first"
+                        : gmpMarket === "mainboard"
+                          ? "Mainboard only"
+                          : "SME only"}
+                    </small>
                   </button>
-                  <div className="gmp-view-label" aria-live="polite">
-                    <span>View</span>
-                    <strong>
-                      {gmpViewModeLabel(gmpViewModes[gmpViewModeIndex], gmpFilter)}
-                    </strong>
-                  </div>
-                  <button
-                    className="gmp-view-arrow"
-                    disabled={gmpViewModeIndex === gmpViewModes.length - 1}
-                    onClick={() =>
-                      setGmpViewModeIndex((index) =>
-                        Math.min(gmpViewModes.length - 1, index + 1)
-                      )
-                    }
-                    title="Next order"
-                    type="button"
-                    aria-label="Next IPO order"
+                </div>
+              ) : null}
+
+              {filterSheetOpen ? (
+                <div
+                  className="filter-sheet-backdrop"
+                  onMouseDown={() => setFilterSheetOpen(false)}
+                  role="presentation"
+                >
+                  <section
+                    aria-labelledby="filter-sheet-title"
+                    aria-modal="true"
+                    className="filter-sheet"
+                    onMouseDown={(event) => event.stopPropagation()}
+                    role="dialog"
                   >
-                    &#8594;
-                  </button>
+                    <div className="filter-sheet-head">
+                      <div>
+                        <p className="eyebrow">GMP view</p>
+                        <h3 id="filter-sheet-title">Sort &amp; Filter</h3>
+                      </div>
+                      <button
+                        aria-label="Close sort and filter"
+                        className="sheet-close"
+                        onClick={() => setFilterSheetOpen(false)}
+                        title="Close"
+                        type="button"
+                      >
+                        <span aria-hidden="true">&#215;</span>
+                      </button>
+                    </div>
+
+                    <fieldset className="filter-fieldset">
+                      <legend>Market</legend>
+                      <div className="sheet-options">
+                        {(["all", "mainboard", "sme"] as const).map((market) => (
+                          <button
+                            aria-pressed={gmpMarket === market}
+                            className={gmpMarket === market ? "active" : ""}
+                            key={market}
+                            onClick={() => updateGmpMarket(market)}
+                            type="button"
+                          >
+                            {market === "all"
+                              ? "All IPOs"
+                              : market === "mainboard"
+                                ? "Mainboard"
+                                : "SME"}
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+
+                    <fieldset className="filter-fieldset">
+                      <legend>Order</legend>
+                      <div className="sheet-options vertical">
+                        {(["date", "mainboard_first", "sme_first"] as const).map((sort) => (
+                          <button
+                            aria-pressed={gmpSort === sort}
+                            className={gmpSort === sort ? "active" : ""}
+                            key={sort}
+                            onClick={() => updateGmpSort(sort)}
+                            type="button"
+                          >
+                            {sort === "date"
+                              ? gmpFilter === "open"
+                                ? "Closing soon first"
+                                : "Opening soon first"
+                              : sort === "mainboard_first"
+                                ? "Mainboard first"
+                                : "SME first"}
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+
+                    <button
+                      className="primary sheet-done"
+                      onClick={() => setFilterSheetOpen(false)}
+                      type="button"
+                    >
+                      Done
+                    </button>
+                  </section>
                 </div>
               ) : null}
 
               <div className="gmp-results-anchor" ref={gmpResultsTop} />
 
-              {filteredGmp.length ? (
+              {gmpFilter !== "closed" && feedState.state === "cached" ? (
+                <div className="feed-state cached" role="status">
+                  <strong>Cached data</strong>
+                  <span>
+                    Last successful update {timeLabel(feedState.updatedAt)}. Live refresh is retrying automatically.
+                  </span>
+                </div>
+              ) : null}
+
+              {gmpFilter !== "closed" && feedState.state === "unavailable" ? (
+                <div className="feed-state unavailable" role="status">
+                  <strong>Live source temporarily unavailable</strong>
+                  <span>No current data was replaced or guessed. Retrying automatically.</span>
+                </div>
+              ) : null}
+
+              {gmpFilter === "closed" && closedFeedState.state === "cached" ? (
+                <div className="feed-state cached" role="status">
+                  <strong>Cached history</strong>
+                  <span>Last saved update {timeLabel(closedFeedState.updatedAt)}.</span>
+                </div>
+              ) : null}
+
+              {gmpFilter === "closed" && closedFeedState.state === "unavailable" ? (
+                <div className="feed-state unavailable" role="status">
+                  <strong>Closed IPO history temporarily unavailable</strong>
+                  <span>The last visible rows were not replaced.</span>
+                </div>
+              ) : null}
+
+              {showGmpSkeleton ? (
+                <div className="gmp-list" aria-label="Loading IPO data" aria-busy="true">
+                  {Array.from({ length: 4 }, (_, index) => (
+                    <div className="gmp-card skeleton-card" key={index}>
+                      <div className="skeleton-copy">
+                        <span className="skeleton-line title" />
+                        <span className="skeleton-line meta" />
+                        <span className="skeleton-line dates" />
+                      </div>
+                      {Array.from({ length: 5 }, (__, cell) => (
+                        <span className="skeleton-line value" key={cell} />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ) : filteredGmp.length ? (
                 <div className="gmp-list">
                   {filteredGmp.map((row) => (
                     <article className="gmp-card" key={row.id}>
@@ -1434,16 +1750,25 @@ export default function Home() {
                           >
                             {row.marketType ?? "Mainboard"}
                           </span>
+                          {gmpTimingLabel(row, gmpFilter, indiaDate()) ? (
+                            <span className="timing-tag">
+                              {gmpTimingLabel(row, gmpFilter, indiaDate())}
+                            </span>
+                          ) : null}
                         </div>
                         <p>
-                          {statusLabel(gmpGroup(row))} • Updated{" "}
-                          {timeLabel(row.gmpLastUpdated)}
+                          {statusLabel(gmpGroup(row))} &bull;{" "}
+                          {row.gmpLastUpdated
+                            ? `GMP updated ${timeLabel(row.gmpLastUpdated)}`
+                            : "GMP update unavailable"}
                         </p>
                         <div className="date-strip">
-                          <span>Open {dateLabel(row.openDate)}</span>
-                          <span>Close {dateLabel(row.closeDate)}</span>
-                          <span>Allot {dateLabel(row.allotmentDate)}</span>
-                          <span>List {dateLabel(row.listingDate)}</span>
+                          {row.openDate ? <span>Open {dateLabel(row.openDate)}</span> : null}
+                          {row.closeDate ? <span>Close {dateLabel(row.closeDate)}</span> : null}
+                          {row.allotmentDate ? (
+                            <span>Allot {dateLabel(row.allotmentDate)}</span>
+                          ) : null}
+                          {row.listingDate ? <span>List {dateLabel(row.listingDate)}</span> : null}
                         </div>
                       </div>
                       <div className="gmp-cell">
@@ -1457,21 +1782,36 @@ export default function Home() {
                         </strong>
                       </div>
                       <div className="gmp-cell">
-                        <span>GMP</span>
-                        <strong className={row.gmp >= 0 ? "positive" : ""}>
-                          {rupee(row.gmp)}
+                        <span>Latest GMP</span>
+                        <strong
+                          className={
+                            typeof row.gmp === "number" && row.gmp >= 0 ? "positive" : ""
+                          }
+                        >
+                          {typeof row.gmp === "number" ? rupee(row.gmp) : "Not available"}
                         </strong>
                       </div>
                       <div className="gmp-cell">
                         <span>GMP %</span>
-                        <strong className={row.gmpPercent >= 0 ? "positive" : ""}>
-                          {row.gmpPercent >= 0 ? "+" : ""}
-                          {row.gmpPercent.toFixed(1)}%
+                        <strong
+                          className={
+                            typeof row.gmpPercent === "number" && row.gmpPercent >= 0
+                              ? "positive"
+                              : ""
+                          }
+                        >
+                          {typeof row.gmpPercent === "number"
+                            ? `${row.gmpPercent >= 0 ? "+" : ""}${row.gmpPercent.toFixed(1)}%`
+                            : "Not available"}
                         </strong>
                       </div>
                       <div className="gmp-cell">
                         <span>Est. Listing</span>
-                        <strong>{rupee(row.estimatedListingPrice)}</strong>
+                        <strong>
+                          {typeof row.estimatedListingPrice === "number"
+                            ? rupee(row.estimatedListingPrice)
+                            : "Not available"}
+                        </strong>
                       </div>
                     </article>
                   ))}
@@ -1489,10 +1829,10 @@ export default function Home() {
                             aria-label="Closed IPOs per page"
                             value={closedPageSize}
                             onChange={(event) => {
+                              const pageSize = Number(event.target.value) as (typeof closedPageSizes)[number];
                               setClosedPage(1);
-                              setClosedPageSize(
-                                Number(event.target.value) as (typeof closedPageSizes)[number]
-                              );
+                              setClosedPageSize(pageSize);
+                              updateViewHash("gmp", { page: 1, pageSize });
                             }}
                           >
                             {closedPageSizes.map((size) => (
@@ -1508,7 +1848,11 @@ export default function Home() {
                           aria-label="Previous closed IPO page"
                           className="page-button page-direction"
                           disabled={closedLoading || closedPage === 1}
-                          onClick={() => setClosedPage((page) => Math.max(1, page - 1))}
+                          onClick={() => {
+                            const page = Math.max(1, closedPage - 1);
+                            setClosedPage(page);
+                            updateViewHash("gmp", { page });
+                          }}
                           type="button"
                         >
                           Previous
@@ -1519,7 +1863,10 @@ export default function Home() {
                             className={`page-button ${closedPage === page ? "active" : ""}`}
                             disabled={closedLoading}
                             key={page}
-                            onClick={() => setClosedPage(page)}
+                            onClick={() => {
+                              setClosedPage(page);
+                              updateViewHash("gmp", { page });
+                            }}
                             type="button"
                           >
                             {page}
@@ -1529,9 +1876,11 @@ export default function Home() {
                           aria-label="Next closed IPO page"
                           className="page-button page-direction"
                           disabled={closedLoading || closedPage >= closedTotalPages}
-                          onClick={() =>
-                            setClosedPage((page) => Math.min(closedTotalPages, page + 1))
-                          }
+                          onClick={() => {
+                            const page = Math.min(closedTotalPages, closedPage + 1);
+                            setClosedPage(page);
+                            updateViewHash("gmp", { page });
+                          }}
                           type="button"
                         >
                           Next
@@ -1540,23 +1889,25 @@ export default function Home() {
                     </div>
                   ) : null}
                 </div>
-              ) : (
+              ) :
+                (gmpFilter !== "closed" && feedState.state === "unavailable") ||
+                  (gmpFilter === "closed" && closedFeedState.state === "unavailable") ? null : (
                 <div className="empty">
                   {closedLoading
                     ? "Loading closed IPO history..."
                     : feedLoading && gmpFilter !== "closed"
                       ? "Loading current IPO data..."
-                      : loadError && gmpFilter !== "closed"
-                        ? loadError
-                        : gmpSearch.trim()
+                      : gmpSearch.trim()
                           ? "No IPOs match this search."
-                          : `No ${statusLabel(gmpFilter).toLowerCase()} IPOs are available right now.`}
+                          : gmpFilter === "open"
+                            ? feedState.state === "cached"
+                              ? "No open IPO appears in this cached update."
+                              : "No IPO is currently open."
+                            : feedState.state === "cached" && gmpFilter === "upcoming"
+                              ? "No upcoming IPO appears in this cached update."
+                              : `No ${statusLabel(gmpFilter).toLowerCase()} IPOs are available right now.`}
                 </div>
               )}
-
-              {loadError && gmpFilter !== "closed" && filteredGmp.length ? (
-                <p className="error-text">{loadError}</p>
-              ) : null}
 
               {closedError && gmpFilter === "closed" ? (
                 <p className="error-text">{closedError}</p>

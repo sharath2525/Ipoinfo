@@ -1,5 +1,15 @@
 import type { AllotmentAvailability, Ipo, IpoMarket, IpoStatus } from "@/lib/types";
-import { cleanIpoName, effectiveIpoStatus, ipoNameKey } from "@/lib/ipo-normalization";
+import {
+  cleanIpoName,
+  effectiveIpoStatus,
+  isoDateOnly,
+  ipoNameKey,
+  sanitizeIpoDates
+} from "@/lib/ipo-normalization";
+import {
+  assessPublicSourceFreshness,
+  observePublicSource
+} from "@/lib/providers/source-health";
 import * as cheerio from "cheerio";
 
 type IpoGuruRow = {
@@ -44,10 +54,10 @@ type IpoAlertsRow = {
 
 type IpoWatchParsedRow = {
   name: string;
-  gmp: number;
+  gmp?: number;
   price: number;
-  estimatedListingPrice: number;
-  estimatedListingGainPercent: number;
+  estimatedListingPrice?: number;
+  estimatedListingGainPercent?: number;
   dates: string;
   status: IpoStatus;
   lastUpdated: string;
@@ -109,6 +119,13 @@ function numberFrom(value: unknown) {
   if (typeof value !== "string") return 0;
   const match = value.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
   return match ? Number(match[0]) : 0;
+}
+
+function optionalNumber(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const match = value.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
+  return match ? Number(match[0]) : undefined;
 }
 
 function upperPrice(priceBand?: string | null, issuePrice?: string | number | null) {
@@ -198,6 +215,18 @@ function responseCookies(response: Response) {
     .join("; ");
 }
 
+function ipoPremiumToken(html: string) {
+  return (
+    html.match(/d\._token\s*=\s*['\"]([^'\"]+)['\"]/i)?.[1] ??
+    html.match(
+      /<meta\s+[^>]*name=['\"]csrf-token['\"][^>]*content=['\"]([^'\"]+)['\"]/i
+    )?.[1] ??
+    html.match(
+      /<meta\s+[^>]*content=['\"]([^'\"]+)['\"][^>]*name=['\"]csrf-token['\"]/i
+    )?.[1]
+  );
+}
+
 function ipoMarketFromName(value: string): IpoMarket {
   return /\bsme\b/i.test(value) ? "SME" : "Mainboard";
 }
@@ -224,8 +253,9 @@ function normalizeIpoPremium(row: IpoPremiumRow, fetchedAt: string): Ipo | null 
   });
   const issuePriceMin = numberFrom(row.min_price);
   const issuePriceMax = numberFrom(row.max_price) || issuePriceMin;
+  const gmp = optionalNumber(row.premium);
 
-  return {
+  return normalizedIpo({
     id: `ipopremium-${row.id ?? slugify(`${name}-${openDate}`)}`,
     name,
     symbol: row.script_code?.trim() || undefined,
@@ -240,10 +270,41 @@ function normalizeIpoPremium(row: IpoPremiumRow, fetchedAt: string): Ipo | null 
     registrar: "Registrar to confirm",
     status,
     allotmentAvailability: availabilityFrom(status, allotmentDate),
-    gmp: numberFrom(row.premium),
-    gmpLastUpdated: fetchedAt,
+    gmp,
+    gmpLastUpdated: gmp === undefined ? undefined : fetchedAt,
     dataSource: "IPO Premium"
-  };
+  });
+}
+
+function parseIpoPremiumRenderedRows(html: string, fetchedAt: string) {
+  const $ = cheerio.load(html);
+  const rows: Ipo[] = [];
+
+  $("noscript table tbody tr").each((index, element) => {
+    const cells = $(element).find("td");
+    if (cells.length < 7) return;
+
+    const nameCell = cells.eq(0).html() ?? cells.eq(0).text();
+    const market = cells.eq(1).text().trim();
+    const price = cells.eq(5).text().trim();
+    const priceValues = price.replace(/,/g, "").match(/\d+(?:\.\d+)?/g) ?? [];
+    const normalized = normalizeIpoPremium(
+      {
+        id: `rendered-${index}-${slugify(cells.eq(0).text())}`,
+        name: `${nameCell} (${market === "SME" ? "SME" : "MAINBOARD"})`,
+        min_price: priceValues[0],
+        max_price: priceValues.at(-1),
+        premium: cells.eq(2).text().trim(),
+        open: cells.eq(3).text().trim(),
+        close: cells.eq(4).text().trim(),
+        listing_date: cells.eq(6).text().trim()
+      },
+      fetchedAt
+    );
+    if (normalized) rows.push(normalized);
+  });
+
+  return rows;
 }
 
 export async function fetchIpoPremiumIposPage({
@@ -273,8 +334,21 @@ export async function fetchIpoPremiumIposPage({
     }
 
     const html = await pageResponse.text();
-    const token = html.match(/d\._token\s*=\s*['\"]([^'\"]+)['\"]/i)?.[1];
-    if (!token) throw new Error("IPO Premium session token was unavailable");
+    const fetchedAt = new Date().toISOString();
+    const renderedRows = parseIpoPremiumRenderedRows(html, fetchedAt);
+    const token = ipoPremiumToken(html);
+    const visibleRenderedRows = () =>
+      renderedRows.filter((ipo) => {
+        const current = effectiveIpoStatus(ipo);
+        return status === "all" || current === status;
+      });
+    if (!token) {
+      const visibleRows = visibleRenderedRows();
+      if (visibleRows.length) {
+        return { ipos: visibleRows.slice(start, start + length), total: visibleRows.length };
+      }
+      throw new Error("IPO Premium session token was unavailable");
+    }
 
     const body = new URLSearchParams({
       draw: "1",
@@ -289,45 +363,56 @@ export async function fetchIpoPremiumIposPage({
       open_ipos: String(status === "open"),
       closed_ipos: String(status === "closed")
     });
-    const dataResponse = await fetch("https://dash.ipopremium.in/ipo", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "User-Agent": userAgent,
-        "X-Requested-With": "XMLHttpRequest",
-        Cookie: responseCookies(pageResponse)
-      },
-      body,
-      signal: controller.signal,
-      cache: "no-store"
-    });
+    try {
+      const dataResponse = await fetch("https://dash.ipopremium.in/ipo", {
+        method: "POST",
+        headers: {
+          Accept: "application/json, text/javascript, */*; q=0.01",
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "User-Agent": userAgent,
+          "X-Requested-With": "XMLHttpRequest",
+          Origin: "https://dash.ipopremium.in",
+          Referer: "https://dash.ipopremium.in/",
+          Cookie: responseCookies(pageResponse)
+        },
+        body,
+        signal: controller.signal,
+        cache: "no-store"
+      });
 
-    if (!dataResponse.ok) {
-      throw new Error(`IPO Premium data returned ${dataResponse.status}`);
+      if (!dataResponse.ok) {
+        throw new Error(`IPO Premium data returned ${dataResponse.status}`);
+      }
+
+      const payload = (await dataResponse.json()) as IpoPremiumPayload;
+      const ipos = (payload.data ?? [])
+        .map((row) => normalizeIpoPremium(row, fetchedAt))
+        .filter(Boolean) as Ipo[];
+      if (!ipos.length) throw new Error("IPO Premium returned no usable rows");
+
+      return {
+        ipos,
+        total: payload.recordsFiltered ?? payload.recordsTotal ?? ipos.length
+      };
+    } catch (error) {
+      const visibleRows = visibleRenderedRows();
+      if (visibleRows.length) {
+        return { ipos: visibleRows.slice(start, start + length), total: visibleRows.length };
+      }
+      throw error;
     }
-
-    const payload = (await dataResponse.json()) as IpoPremiumPayload;
-    const fetchedAt = new Date().toISOString();
-    const ipos = (payload.data ?? [])
-      .map((row) => normalizeIpoPremium(row, fetchedAt))
-      .filter(Boolean) as Ipo[];
-
-    return {
-      ipos,
-      total: payload.recordsFiltered ?? payload.recordsTotal ?? ipos.length
-    };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function parseListing(value: string, price: number, gmp: number) {
-  const listing = numberFrom(value);
+function parseListing(value: string) {
+  const listing = optionalNumber(value);
   const percentMatch = value.match(/\((-?\d+(\.\d+)?)%\)/);
 
   return {
-    estimatedListingPrice: listing || price + gmp,
-    estimatedListingGainPercent: percentMatch ? Number(percentMatch[1]) : 0
+    estimatedListingPrice: listing,
+    estimatedListingGainPercent: percentMatch ? Number(percentMatch[1]) : undefined
   };
 }
 
@@ -352,7 +437,7 @@ function monthIndexFromName(value: string) {
 
 function dateOnly(year: number, monthIndex: number, day: number) {
   const month = String(monthIndex + 1).padStart(2, "0");
-  return `${year}-${month}-${String(day).padStart(2, "0")}`;
+  return isoDateOnly(`${year}-${month}-${String(day).padStart(2, "0")}`);
 }
 
 function yearAwareRange(value: string) {
@@ -409,23 +494,6 @@ function yearAwareRange(value: string) {
   };
 }
 
-function estimateAllotmentDate(closeDate: string, status: IpoStatus) {
-  if (!closeDate) return "";
-  const close = new Date(closeDate);
-  if (Number.isNaN(close.getTime())) return "";
-  const offset = status === "listed" ? 2 : 3;
-  close.setUTCDate(close.getUTCDate() + offset);
-  return close.toISOString().slice(0, 10);
-}
-
-function estimateListingDate(closeDate: string) {
-  if (!closeDate) return "";
-  const close = new Date(closeDate);
-  if (Number.isNaN(close.getTime())) return "";
-  close.setUTCDate(close.getUTCDate() + 5);
-  return close.toISOString().slice(0, 10);
-}
-
 function statusFromDates(openDate: string, closeDate: string): IpoStatus {
   return effectiveIpoStatus({ status: "upcoming", openDate, closeDate });
 }
@@ -436,7 +504,7 @@ function normalizeKey(name: string) {
 
 function isoDate(value?: string) {
   if (!value) return "";
-  if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}/.test(value)) return isoDateOnly(value.slice(0, 10));
 
   const monthIndex = monthIndexFromName(value);
   const year = Number(value.match(/\b20\d{2}\b/)?.[0] ?? 0);
@@ -507,7 +575,6 @@ function rowToIpo(row: IpoWatchParsedRow): Ipo {
     openDate: range.openDate,
     closeDate: range.closeDate
   });
-  const allotmentDate = estimateAllotmentDate(range.closeDate, status);
 
   return {
     id: slugify(`${row.name}-${range.openDate || row.section}`),
@@ -517,11 +584,11 @@ function rowToIpo(row: IpoWatchParsedRow): Ipo {
     lotSize: 0,
     openDate: range.openDate,
     closeDate: range.closeDate,
-    allotmentDate,
-    listingDate: estimateListingDate(range.closeDate),
+    allotmentDate: "",
+    listingDate: "",
     registrar: "Registrar to confirm",
     status,
-    allotmentAvailability: availabilityFrom(status, allotmentDate),
+    allotmentAvailability: availabilityFrom(status, undefined),
     gmp: row.gmp,
     gmpLastUpdated: row.lastUpdated,
     dataSource: "IPOWatch"
@@ -538,7 +605,6 @@ function calendarRowToIpo(cells: string[]): Ipo | null {
   }
 
   const status = statusFromDates(openDate, closeDate);
-  const allotmentDate = estimateAllotmentDate(closeDate, status);
   const issuePriceMax = upperPrice(cells[5], null);
 
   return {
@@ -549,13 +615,11 @@ function calendarRowToIpo(cells: string[]): Ipo | null {
     lotSize: 0,
     openDate,
     closeDate,
-    allotmentDate,
-    listingDate: estimateListingDate(closeDate),
+    allotmentDate: "",
+    listingDate: "",
     registrar: "Registrar to confirm",
     status,
-    allotmentAvailability: availabilityFrom(status, allotmentDate),
-    gmp: 0,
-    gmpLastUpdated: "",
+    allotmentAvailability: availabilityFrom(status, undefined),
     dataSource: "IPOWatch Calendar"
   };
 }
@@ -581,8 +645,8 @@ function parseIpoWatchRows(html: string) {
       }
 
       const price = numberFrom(cells[3]);
-      const gmp = numberFrom(cells[1]);
-      const listing = parseListing(cells[4], price, gmp);
+      const gmp = optionalNumber(cells[1]);
+      const listing = parseListing(cells[4]);
 
       rows.push({
         name: cells[0].replace(/\s+IPO$/i, ""),
@@ -922,7 +986,7 @@ async function fetchIpoJiIpos() {
             .then(parseIpoJiAllotmentInfo)
             .catch(() => ({ allotmentDate: "", registrar: "" }))
         : { allotmentDate: "", registrar: "" };
-      const allotmentDate = info.allotmentDate || estimateAllotmentDate(row.closeDate, row.status);
+      const allotmentDate = info.allotmentDate;
       const registrar = info.registrar || "Registrar to confirm";
 
       return {
@@ -933,14 +997,12 @@ async function fetchIpoJiIpos() {
         openDate: row.openDate,
         closeDate: row.closeDate,
         allotmentDate,
-        listingDate: estimateListingDate(row.closeDate),
+        listingDate: "",
         registrar,
         allotmentUrl: registrarUrl(registrar),
-        allotmentStatusText: allotmentDate ? `Out: ${shortDateText(allotmentDate)}` : "Out",
+        allotmentStatusText: allotmentDate ? `Out: ${shortDateText(allotmentDate)}` : undefined,
         status: row.status,
         allotmentAvailability: availabilityFrom(row.status, allotmentDate),
-        gmp: 0,
-        gmpLastUpdated: "",
         dataSource: "IPO Ji"
       };
     })
@@ -962,15 +1024,16 @@ function monthCalendarUrls() {
 }
 
 function normalizedIpo(ipo: Ipo): Ipo {
-  const name = cleanIpoName(ipo.name);
-  const status = effectiveIpoStatus(ipo);
+  const datedIpo = sanitizeIpoDates(ipo);
+  const name = cleanIpoName(datedIpo.name);
+  const status = effectiveIpoStatus(datedIpo);
 
   return {
-    ...ipo,
-    id: ipo.id || slugify(`${name}-${ipo.openDate}`),
+    ...datedIpo,
+    id: datedIpo.id || slugify(`${name}-${datedIpo.openDate}`),
     name,
     status,
-    allotmentAvailability: availabilityFrom(status, ipo.allotmentDate)
+    allotmentAvailability: availabilityFrom(status, datedIpo.allotmentDate)
   };
 }
 
@@ -1110,8 +1173,11 @@ function normalizeIpoGuru(row: IpoGuruRow): Ipo | null {
     registrar: row.registrar ?? "Registrar unavailable",
     status,
     allotmentAvailability: availabilityFrom(status, allotmentDate),
-    gmp: numberFrom(row.gmp?.price),
-    gmpLastUpdated: row.gmp?.updated_at ?? undefined,
+    gmp: optionalNumber(row.gmp?.price),
+    gmpLastUpdated:
+      optionalNumber(row.gmp?.price) === undefined
+        ? undefined
+        : row.gmp?.updated_at ?? undefined,
     dataSource: "IPO Guru"
   };
 }
@@ -1123,8 +1189,7 @@ function normalizeIpoAlerts(row: IpoAlertsRow): Ipo | null {
   const gmp =
     row.gmp?.aggregations?.median ??
     row.gmp?.aggregations?.mode ??
-    row.gmp?.aggregations?.mean ??
-    0;
+    row.gmp?.aggregations?.mean;
 
   return {
     id: row.id ?? row.slug ?? slugify(row.name),
@@ -1167,34 +1232,60 @@ export async function fetchIpoAlertsIpos(apiKey: string) {
 }
 
 export async function fetchIpoWatchIpos() {
-  const ipoPremiumPromise = fetchIpoPremiumIposPage({
-    length: 100,
-    timeoutMs: 6000
-  }).catch(() => ({ ipos: [] as Ipo[], total: 0 }));
-  const ipoJiPromise = fetchIpoJiIpos().catch(() => [] as Ipo[]);
-  const [gmpHtml, allotmentHtml, ipo360Html, ...calendarResults] = await Promise.all([
-    fetchHtml("https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/", 8000).catch(
-      () => ""
-    ),
-    fetchHtml("https://ipowatch.in/ipo-allotment-status-how-to-check/", 6000).catch(
-      () => ""
-    ),
-    fetchHtml("https://www.ipo360.in/allotment-status", 6000).catch(() => ""),
-    ...monthCalendarUrls().map((url) =>
-      fetchHtml(url, 6000).catch(() => "")
-    )
-  ]);
-  const gmpIpos = gmpHtml ? parseIpoWatchRows(gmpHtml).map(rowToIpo) : [];
-  const calendarIpos = calendarResults.flatMap((html) =>
-    html ? parseIpoWatchCalendarRows(html) : []
-  );
-  const [ipoJiIpos, ipoPremiumPage] = await Promise.all([
-    ipoJiPromise,
-    ipoPremiumPromise
-  ]);
+  const calendarUrls = monthCalendarUrls();
+  const [gmpIpos, ipoWatchAllotments, ipo360Allotments, ipoJiIpos, ipoPremiumPage, ...calendarGroups] =
+    await Promise.all([
+      observePublicSource(
+        "ipowatch-gmp",
+        async () =>
+          parseIpoWatchRows(
+            await fetchHtml(
+              "https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/",
+              8000
+            )
+          ).map(rowToIpo),
+        (rows) => rows.length,
+        "malformed"
+      ).catch(() => [] as Ipo[]),
+      observePublicSource(
+        "ipowatch-allotment",
+        async () =>
+          parseIpoWatchAllotmentRows(
+            await fetchHtml("https://ipowatch.in/ipo-allotment-status-how-to-check/", 6000)
+          ),
+        (rows) => rows.length,
+        "malformed"
+      ).catch(() => [] as IpoWatchAllotmentRow[]),
+      observePublicSource(
+        "ipo360-allotment",
+        async () =>
+          parseIpo360AllotmentRows(
+            await fetchHtml("https://www.ipo360.in/allotment-status", 6000)
+          ),
+        (rows) => rows.length,
+        "malformed"
+      ).catch(() => [] as IpoWatchAllotmentRow[]),
+      observePublicSource("ipoji-current", fetchIpoJiIpos, (rows) => rows.length, "malformed")
+        .catch(() => [] as Ipo[]),
+      observePublicSource(
+        "ipopremium-current",
+        () => fetchIpoPremiumIposPage({ length: 100, timeoutMs: 18000 }),
+        (page) => page.ipos.length,
+        "malformed"
+      ).catch(() => ({ ipos: [] as Ipo[], total: 0 })),
+      ...calendarUrls.map((url) =>
+        observePublicSource(
+          `ipowatch-calendar-${url.match(/calendar-([^/]+)/)?.[1] ?? "unknown"}`,
+          async () => parseIpoWatchCalendarRows(await fetchHtml(url, 6000)),
+          (rows) => rows.length,
+          "malformed"
+        ).catch(() => [] as Ipo[])
+      )
+    ]);
+  const calendarIpos = calendarGroups.flat();
   const allotments = [
-    ...(allotmentHtml ? parseIpoWatchAllotmentRows(allotmentHtml) : []),
-    ...(ipo360Html ? parseIpo360AllotmentRows(ipo360Html) : [])
+    ...ipoWatchAllotments,
+    ...ipo360Allotments
   ];
   const merged = mergeAllotmentInfo(
     mergeIpos(gmpIpos, [...calendarIpos, ...ipoJiIpos, ...ipoPremiumPage.ipos]),
@@ -1204,6 +1295,12 @@ export async function fetchIpoWatchIpos() {
   if (!merged.length) {
     throw new Error("All live IPO sources returned no rows");
   }
+
+  assessPublicSourceFreshness(
+    "ipowatch-gmp",
+    gmpIpos.length,
+    gmpIpos.map((ipo) => ipo.gmpLastUpdated)
+  );
 
   return merged;
 }

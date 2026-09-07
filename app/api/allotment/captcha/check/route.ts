@@ -2,6 +2,7 @@ import * as cheerio from "cheerio";
 import { fetchWithTimeout } from "@/lib/fetch-timeout";
 import { isValidPan, normalizePan } from "@/lib/pan";
 import { classifyOfficialResult } from "@/lib/providers/allotment-result";
+import { withOfficialFallback } from "@/lib/providers/official-registrar";
 import { resolveIpoReference } from "@/lib/providers/ipo-reference";
 import { getPublicIpoFeed } from "@/lib/providers/public-feed";
 import type { AllotmentResult, Ipo } from "@/lib/types";
@@ -334,7 +335,9 @@ export async function POST(request: Request) {
   try {
     const payload = (await response.json()) as { d?: unknown };
     const resultPayload = parseBigsharePayload(payload?.d);
-    return Response.json({ result: resultFromBigsharePayload(ipo, pan, resultPayload) });
+    return Response.json({
+      result: withOfficialFallback(resultFromBigsharePayload(ipo, pan, resultPayload), ipo)
+    });
   } catch {
     return Response.json(
       { error: "Bigshare returned an unreadable response." },

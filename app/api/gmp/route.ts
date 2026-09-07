@@ -1,28 +1,24 @@
-import { getGmpProvider } from "@/lib/providers/gmp-provider";
+import { getPublicIpoFeed } from "@/lib/providers/public-feed";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const provider = getGmpProvider();
-  const meta = provider.getMeta();
-
   try {
-    const gmp = await provider.listCurrentGmp();
+    const { gmp, meta } = await getPublicIpoFeed();
     return Response.json({ gmp, meta });
-  } catch (error) {
+  } catch {
     return Response.json(
       {
         gmp: [],
         meta: {
-          ...meta,
+          source: "multi-source",
           isLive: false,
-          message:
-            error instanceof Error
-              ? `Live provider failed: ${error.message}`
-              : "Live provider failed."
+          dataState: "unavailable",
+          fetchedAt: new Date().toISOString(),
+          message: "Live GMP sources are temporarily unavailable."
         }
       },
-      { status: 502 }
+      { status: 503 }
     );
   }
 }
